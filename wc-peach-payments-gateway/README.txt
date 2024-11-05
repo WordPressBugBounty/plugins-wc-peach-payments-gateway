@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.3
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 3.2.9
-Version: 3.2.9
+Stable tag: 3.3.0
+Version: 3.3.0
 License: GPLv3
 
 
@@ -44,6 +44,13 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 3.3.0 =
+ * Fix - PHP warning when upgrading to latest version of PHP
+ * Enhancement - Only load  CSS and JS front-end assets on cart and checkout
+ * Enhancement - Update Subscription page. Remove flushing of permalinks and rather display admin notice
+ * Fix - Allow for custom "Order IDs" setting when using WooCommerce Sequential Order Numbers Pro plugin
+ * Fix - Refund payments using various checkout methods 
 
 = 3.2.9 =
  * Update - Update card payment endpoints

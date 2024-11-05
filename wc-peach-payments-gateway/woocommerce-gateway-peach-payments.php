@@ -6,7 +6,7 @@
  * Author: Peach Payments
  * Text Domain: woocommerce-gateway-peach-payments
  * Author URI: https://peachpayments.com
- * Version: 3.2.9
+ * Version: 3.3.0
  * Requires at least: 6.3
  * Tested up to: 6.5
  */
@@ -103,6 +103,40 @@ function woocommerce_gateway_peach() {
 	
 	class WC_Peach_Payments extends WC_Payment_Gateway {
 
+		public $peach_statusses;
+		public $card_storage;
+		public $embed_payments;
+		public $embed_clientid;
+		public $embed_clientsecret;
+		public $embed_merchantid;
+		public $checkout_methods;
+		public $checkout_methods_select;
+		public $consolidated_label;
+		public $consolidated_label_logos;
+		public $secrettoken;
+		public $process_checkout_url;
+		public $request_checkout_url;
+		public $request_status_url;
+		public $request_pre_status_url;
+		public $request_refund_url;
+		public $request_refund_url_hosted;
+		public $ssl_verifypeer;
+		public $success_code;
+		public $accesstoken;
+		public $secureid;
+		public $recurringid;
+		public $subscribeProds;
+		public $mixedBasket;
+		public $orderids;
+		public $checkout_page_url;
+		public $order_received_page_url;
+		public $order_pay_page_url;
+		public $card_webhook_key;
+		public $peach_order_status;
+		public $logger_info_settings;
+		public $transactionmode;
+		public $completestatus;
+
 		public function __construct() {
 			require_once ( WC_PEACH_PLUGIN_PATH . '/classes/pluginSupport.php');
 			require_once ( WC_PEACH_PLUGIN_PATH . '/classes/embeddedCheckout.php');
@@ -158,6 +192,7 @@ function woocommerce_gateway_peach() {
 				$this->request_status_url = 'https://testapi.peachpayments.com/v1/checkout/status';
 				$this->request_pre_status_url = 'https://sandbox-card.peachpayments.com/v1/payments';
 				$this->request_refund_url = 'https://testapi.peachpayments.com/v1/checkout/refund';
+				$this->$request_refund_url_hosted = 'https://testapi.peachpayments.com/v1/checkout/refund';
 				$this->ssl_verifypeer = false;
 				$this->success_code = '000.100.110';
 			}else{
@@ -166,6 +201,7 @@ function woocommerce_gateway_peach() {
 				$this->request_status_url = 'https://api.peachpayments.com/v1/checkout/status';
 				$this->request_pre_status_url = 'https://card.peachpayments.com/v1/payments';
 				$this->request_refund_url = 'https://api.peachpayments.com/v1/checkout/refund';
+				$this->$request_refund_url_hosted = 'https://api.peachpayments.com/v1/checkout/refund';
 				$this->ssl_verifypeer = true;
 				$this->success_code = '000.000.000';
 			}
@@ -227,8 +263,7 @@ function woocommerce_gateway_peach() {
 						'httponly' => false,
 						'samesite' => 'Lax'
 						]
-					);
-											
+					);						
 				}else{
 					if(isset($_COOKIE['PeachManualCheckout']) && $_COOKIE['PeachManualCheckout'] == 'other'){
 						if(!in_array('hosted',$this->checkout_methods_select)){
@@ -244,7 +279,6 @@ function woocommerce_gateway_peach() {
 								'samesite' => 'Lax'
 								]
 							);
-							
 						}
 					}
 				}
@@ -751,6 +785,7 @@ function woocommerce_gateway_peach() {
 			$bearerOrderID = $order_id;
 			if((!isset($bearerOrderID) || $bearerOrderID == '') && isset($_COOKIE['PeachOrderID'])){
 				$orderID = $_COOKIE['PeachOrderID'];
+				$logger_info['bearerOrderID_empty'] = $orderID;
 				if($this->orderids != 'yes'){
 					$plugin_support = new pluginSupport();
 					$bearerOrderID = $plugin_support->sequentialNumbers($orderID, 1);
@@ -758,8 +793,12 @@ function woocommerce_gateway_peach() {
 					$bearerOrderID = $_COOKIE['PeachOrderID'];
 				}
 			}
+
+			$logger_info['bearerOrderID_after'] = $bearerOrderID;
 			
 			$order = wc_get_order($bearerOrderID);
+
+			$logger_info['orderafter'] = $order;
 			
 			if(isset($_GET['id']) && isset($_GET['resourcePath'])){
 				
@@ -817,6 +856,7 @@ function woocommerce_gateway_peach() {
 						}
 						
 						$seqOrderID = $orderID;
+
 						if($this->orderids != 'yes'){
 							$plugin_support = new pluginSupport();
 							$seqOrderID = $plugin_support->sequentialNumbers($orderID, 1);
@@ -1001,6 +1041,7 @@ function woocommerce_gateway_peach() {
 						$paymentType = $_POST['paymentType'];
 					}
 					$seqOrderID = $orderID;
+
 					if($this->orderids != 'yes'){
 						$plugin_support = new pluginSupport();
 						$seqOrderID = $plugin_support->sequentialNumbers($orderID, 1);
@@ -1270,14 +1311,16 @@ function woocommerce_gateway_peach() {
 				'shopperResultUrl' => WC_PEACH_SITE_URL.'?wc-api=WC_Peach_Payments'
 			);
 			
-			$order = wc_get_order( $order_id );
-			
 			$seqOrderID = $order_id;
+
+			$order = wc_get_order( $order_id );
 			
 			if($this->orderids != 'yes'){
 				$plugin_support = new pluginSupport();
 				$seqOrderID = $plugin_support->sequentialNumbers($order, 0);
 			}
+
+			//echo '<pre>'.print_r($formatted_order_id, true).'</pre>'; die();
 			
 			setcookie(
 				'PeachOrderID',
@@ -1454,7 +1497,7 @@ function woocommerce_gateway_peach() {
 							$embed_keys = true;
 							$embed_token = $embed->get_access_token($this->transactionmode, $this->embed_clientid, $this->embed_clientsecret, $this->embed_merchantid, 'auth');
 							if($embed_token != 'error'){
-								$embed_checkout_instance = $embed->embed_checkout_instance($this->transactionmode, 'checkout', $embed_token, $order_id, $order, $this->secureid);
+								$embed_checkout_instance = $embed->embed_checkout_instance($this->transactionmode, 'checkout', $embed_token, $seqOrderID, $order, $this->secureid);
 							}else{
 								$embed_errors = true;
 								$logger_info['errors'] = array(
@@ -1836,7 +1879,9 @@ function woocommerce_gateway_peach() {
 		//Process refunds
 		public function process_refund( $order_id, $amount = null, $reason = '' ) {
 			$order = wc_get_order( $order_id );
+			$order_meta = get_post_meta($order->get_id());
 			$seqOrderID = $order_id;
+			$converted_seqOrderID = '';
 			
 			if($this->orderids != 'yes'){
 				$plugin_support = new pluginSupport();
@@ -1844,11 +1889,35 @@ function woocommerce_gateway_peach() {
 			}
 			
 			$id = get_post_meta( $order_id, 'payment_order_id', true );
-			
-			$status = $this->checkStatus($seqOrderID);
-			if($status == $this->success_code){
+
+			if($order_meta['_billing_peach'][0] == 'other'){
+				$converted_seqOrderID = $seqOrderID;
+				for($x=0;$x<2;$x++){
+					if($x == 1){
+						if (strlen($converted_seqOrderID) < 8) {
+							$converted_seqOrderID = str_pad($converted_seqOrderID, 8, '0', STR_PAD_LEFT);
+						}
+					}
+					$status = $this->checkStatus($converted_seqOrderID);
+					if($status[0] == $this->success_code){
+						if(isset($id) && ($id != '' || $id != null)){}else{
+							$id = $status[1];
+						}
+						break;
+					}
+				}
+			}else{
+				$status = $this->checkStatus($seqOrderID);
+			}
+
+			if($status[0] == $this->success_code){
 				return $this->checkoutRefund($id, $amount, $order, $seqOrderID );
 			}else{
+				if($id && ($id == '' || $id == null)){
+					if(isset($status[1]) && ($status[1] != null || $status[1] != '')){
+						$id = $status[1];
+					}
+				}
 				return $this->cardRefund($id, $amount, $order, $seqOrderID);
 			}
 			
@@ -1862,6 +1931,7 @@ function woocommerce_gateway_peach() {
 			$url = $this->request_pre_status_url;
 			
 			$orderID = $seqOrderID = $id;
+
 			if($this->orderids != 'yes'){
 				$plugin_support = new pluginSupport();
 				$seqOrderID = $plugin_support->sequentialNumbers($orderID, 1);
@@ -1941,7 +2011,8 @@ function woocommerce_gateway_peach() {
 			curl_close($ch);
 			
 			if(isset($response->merchantTransactionId)){
-				return $this->success_code;
+				//return [$this->success_code, $response->merchantTransactionId];
+				return [$this->success_code, $response->id];
 			}else{
 				$logger_info['error'] = array(
 					'Order' => $id,
@@ -1955,112 +2026,163 @@ function woocommerce_gateway_peach() {
 		}
 		
 		public function cardRefund($id, $amount, $order, $seqOrderID){
-			$logger = wc_get_logger();
-			$logger_info = array();
-			$logger_info['settings'] = $this->logger_info_settings;
-
-			$url = $this->process_checkout_url."/v1/payments/".$id;
-			$logger_info['url'] = $url;
-			
-			$data = "entityId=" . $this->secureid .
-						"&amount=" . $amount .
-						"&currency=" . $order->get_currency() .
-						"&paymentType=RF";
-		
-			$ch = curl_init();
-			curl_setopt($ch, CURLOPT_URL, $url);
-			curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-						   'Authorization:Bearer '.$this->accesstoken));
-			curl_setopt($ch, CURLOPT_POST, 1);
-			curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-			curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->ssl_verifypeer);
-			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-			curl_setopt($ch, CURLOPT_FAILONERROR, true);
-			
-			$responseData = curl_exec($ch);
-			if(curl_errno($ch)) {
-				$curlError = curl_error($ch);
-				$logger_info['error'] = array(
-					'Order' => $seqOrderID,
-					'Response Code' => 'CURL',
-					'Response' => $curlError,
-				);
-				$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-cardrefund' ) );
-				$order->add_order_note('Peach Refund Failed. '.$curlError,0,false);
-				return $curlError;
-			}
-			curl_close($ch);
-			
-			$responseData = json_decode($responseData);
-			$responseCode = $responseData->result->code;
-			
-			if($responseCode == $this->success_code){
-				$order->add_order_note('Peach #'.$seqOrderID.' [Card] Refunded: '.$order->get_currency().$amount,0,false);
-				return true;
-			}else{
-				$logger_info['error'] = array(
-					'Order' => $seqOrderID,
-					'Response Code' => $responseCode,
-					'Response' => $responseData,
-				);
-				$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-cardrefund' ) );
-				$order->add_order_note('Peach #'.$seqOrderID.' [Card] Refund Failed. '.$responseData->result->description,0,false);
-				return false;
-			}
-		}
-		
-		public function checkoutRefund($id, $amount, $order, $seqOrderID){
-			$logger = wc_get_logger();
-			$logger_info = array();
-			$logger_info['settings'] = $this->logger_info_settings;
+			$order_meta = get_post_meta($order->get_id());
 
 			$amount = $amount;
 			$currency = $order->get_currency();
 			$paymentType = 'RF';
 						
-			$sig_string = 'amount'.$amount.'authentication.entityId'.$secureid.'currency'.$currency.'id'.$id.'paymentType'.$paymentType;
+			$sig_string = 'amount'.$amount.'authentication.entityId'.$this->secureid.'currency'.$currency.'id'.$id.'paymentType'.$paymentType;
 			$secret = $this->secrettoken;
 			$signature = hash_hmac('sha256', $sig_string, $secret);
+
+			$url = $this->$request_refund_url_hosted;
+
+			$data = http_build_query([
+				'amount' => $amount,
+				'authentication.entityId' => $this->secureid,
+				'currency' => $currency,
+				'id' => $id,
+				'paymentType' => $paymentType,
+				'signature' => $signature,
+			]);
 			
-			$url = $this->request_refund_url;
-			$data = "authentication.entityId=" .$this->secureid.
-						"&amount=" .$amount.
-						"&currency=" .$currency.
-						"&paymentType=" .$paymentType.
-						"&id=" .$id.
-						"&signature=" .$signature;
+			$curl = curl_init();
+
+			curl_setopt_array($curl, array(
+				CURLOPT_URL => $url,
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_ENCODING => '',
+				CURLOPT_MAXREDIRS => 10,
+				CURLOPT_TIMEOUT => 0,
+				CURLOPT_FOLLOWLOCATION => true,
+				CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+				CURLOPT_CUSTOMREQUEST => 'POST',
+				CURLOPT_POSTFIELDS => $data,
+				CURLOPT_HTTPHEADER => array(
+					'Content-Type: application/x-www-form-urlencoded'
+					//'Authorization: Bearer '.$this->accesstoken
+				),
+			));
+
+			$responseData = curl_exec($curl);
 			
-			$ch = curl_init();
-			curl_setopt($ch, CURLOPT_URL, $url);
-			curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-						   'Authorization:Bearer '. $this->accesstoken));
-			curl_setopt($ch, CURLOPT_POST, 1);
-			curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-			curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->ssl_verifypeer);
-			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-			curl_setopt($ch, CURLOPT_FAILONERROR, true);
-			
-			if(curl_errno($ch)) {
-				$curlError = curl_error($ch);
+			if(curl_errno($curl)) {
+				$curlError = curl_error($curl);
 				$order->add_order_note('Peach Refund Failed. '.$curlError,0,false);
-				return $curlError;
 			}
-			curl_close($ch);
+			curl_close($curl);
 			
 			$responseData = json_decode($responseData);
 			$responseCode = $responseData->result->code;
 			
 			if($responseCode == $this->success_code){
-				$order->add_order_note('Peach #'.$seqOrderID.' [Checkout] Refunded: '.$order->get_currency().$amount,0,false);
+				$order->add_order_note('Peach #'.$seqOrderID.' Refunded: '.$order->get_currency().$amount,0,false);
 				return true;
 			}else{
-				$logger_info['errors'] = array(
-					'Order ID' => $seqOrderID,
-					'Response Code' => $responseCode,
-					'Response' => $responseData,
-				);
-				$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-checkoutrefund' ) );
-				$order->add_order_note('Peach #'.$seqOrderID.' [Checkout] Refund Failed. '.$responseData->result->description,0,false);
+				$order->add_order_note('Peach #'.$seqOrderID.' Refund Failed. '.$responseData->result->description,0,false);
+				return false;
+			}
+		}
+		
+		public function checkoutRefund($id, $amount, $order, $seqOrderID){
+			$order_meta = get_post_meta($order->get_id());
+			$billing_peach = $order_meta['_billing_peach'];
+
+			$amount = $amount;
+			$currency = $order->get_currency();
+			$paymentType = 'RF';
+						
+			$sig_string = 'amount'.$amount.'authentication.entityId'.$this->secureid.'currency'.$currency.'id'.$id.'paymentType'.$paymentType;
+			$secret = $this->secrettoken;
+			$signature = hash_hmac('sha256', $sig_string, $secret);
+
+			$responseData = $responseCode = '';
+			if($billing_peach[0] == 'other'){
+				$url = $this->$request_refund_url_hosted;
+
+				$data = http_build_query([
+					'amount' => $amount,
+					'authentication.entityId' => $this->secureid,
+					'currency' => $currency,
+					'id' => $id,
+					'paymentType' => $paymentType,
+					'signature' => $signature,
+				]);
+				
+				$curl = curl_init();
+
+				curl_setopt_array($curl, array(
+					CURLOPT_URL => $url,
+					CURLOPT_RETURNTRANSFER => true,
+					CURLOPT_ENCODING => '',
+					CURLOPT_MAXREDIRS => 10,
+					CURLOPT_TIMEOUT => 0,
+					CURLOPT_FOLLOWLOCATION => true,
+					CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+					CURLOPT_CUSTOMREQUEST => 'POST',
+					CURLOPT_POSTFIELDS => $data,
+					CURLOPT_HTTPHEADER => array(
+						'Content-Type: application/x-www-form-urlencoded'
+						//'Authorization: Bearer '.$this->accesstoken
+					),
+				));
+
+				$responseData = curl_exec($curl);
+				
+				if(curl_errno($curl)) {
+					$curlError = curl_error($curl);
+					$order->add_order_note('Peach Refund Failed. '.$curlError,0,false);
+				}
+				curl_close($curl);
+				
+				$responseData = json_decode($responseData);
+				$responseCode = $responseData->result->code;
+			}else{
+			
+				$url = $this->request_refund_url;
+				$data = "authentication.entityId=" .$this->secureid.
+							"&amount=" .$amount.
+							"&currency=" .$currency.
+							"&paymentType=" .$paymentType.
+							"&id=" .$id.
+							"&signature=" .$signature;
+				
+				$curl = curl_init();
+
+				curl_setopt_array($curl, array(
+					CURLOPT_URL => $url,
+					CURLOPT_RETURNTRANSFER => true,
+					CURLOPT_ENCODING => '',
+					CURLOPT_MAXREDIRS => 10,
+					CURLOPT_TIMEOUT => 0,
+					CURLOPT_FOLLOWLOCATION => true,
+					CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+					CURLOPT_CUSTOMREQUEST => 'POST',
+					CURLOPT_POSTFIELDS => $data,
+					CURLOPT_HTTPHEADER => array(
+						'Content-Type: application/x-www-form-urlencoded'
+						//'Authorization: Bearer '.$this->accesstoken
+					),
+				));
+
+				$responseData = curl_exec($curl);
+				
+				if(curl_errno($curl)) {
+					$curlError = curl_error($curl);
+					$order->add_order_note('Peach Refund Failed. '.$curlError,0,false);
+				}
+				curl_close($curl);
+				
+				$responseData = json_decode($responseData);
+				$responseCode = $responseData->result->code;
+		    }
+			
+			if($responseCode == $this->success_code){
+				$order->add_order_note('Peach #'.$seqOrderID.' Refunded: '.$order->get_currency().$amount,0,false);
+				return true;
+			}else{
+				$order->add_order_note('Peach #'.$seqOrderID.' Refund Failed. '.$responseData->result->description,0,false);
 				return false;
 			}
 		}
@@ -2843,6 +2965,13 @@ function woocommerce_gateway_peach_init() {
 	
 }
 
+//Subscription Check
+function woocommerce_peach_wc_subscriptions() {
+	echo '<div class="notice notice-error is-dismissible">
+		<p>' . __('Peach Payments Gateway could not find the "Update Subscription" page. The "Update Card" function for excisting subscriptions won\'t work. Please fush your permalinks for this page to be active.', 'woocommerce-gateway-peach-payments') . '</p>
+	</div>';
+}
+
 //SSL Check
 function woocommerce_peach_wc_ssl() {
 	echo '<div class="error"><p><strong>' . esc_html__( 'Peach Payments has detected that there are no valid SSL Certificate installed on your website. This payment gateway might not function optimal without it!') . '</strong></p></div>';
@@ -2884,14 +3013,16 @@ function peach_enqueue_admin_scripts( $hook ) {
 }
 
 //Load Front-end Scripts
-function peach_required_scripts() { 
-    wp_register_style( 'peach_front_css', WC_PEACH_PLUGIN_URL.'/assets/css/front-peach.css');
-    wp_enqueue_style( 'peach_front_css' );
-	
-	wp_register_script('peach_front_js', WC_PEACH_PLUGIN_URL.'/assets/js/front-peach.js',array('jquery'),'', true);
-    wp_enqueue_script('peach_front_js');
-	
-	wp_localize_script('peach_front_js', 'peach_ajax_object', array( 'ajax_url' => admin_url( 'admin-ajax.php' ), 'ajax_nonce' => wp_create_nonce('ajax-nonce') ) );
+function peach_required_scripts() {
+	if (is_cart() || is_checkout() || is_account_page() ) { 
+		wp_register_style( 'peach_front_css', WC_PEACH_PLUGIN_URL.'/assets/css/front-peach.css');
+		wp_enqueue_style( 'peach_front_css' );
+		
+		wp_register_script('peach_front_js', WC_PEACH_PLUGIN_URL.'/assets/js/front-peach.js',array('jquery'),'', true);
+		wp_enqueue_script('peach_front_js');
+		
+		wp_localize_script('peach_front_js', 'peach_ajax_object', array( 'ajax_url' => admin_url( 'admin-ajax.php' ), 'ajax_nonce' => wp_create_nonce('ajax-nonce') ) );
+	}
 }
 
 // Our hooked in function – $fields is passed via the filter!
@@ -2980,14 +3111,33 @@ add_action( 'init', 'peach_add_cards_support_endpoint' );
 function peach_cards_support_query_vars( $vars ) {
     $vars[] = 'my-cards';
 	$vars[] = 'add-card';
-	$vars[] = 'update-subscription';
+	if (is_plugin_active('woocommerce-subscriptions/woocommerce-subscriptions.php') || is_plugin_active('woocommerce-subscriptions-pro/woocommerce-subscriptions-pro.php')) {
+		$vars[] = 'update-subscription';
+	}
     return $vars;
 }  
 add_filter( 'query_vars', 'peach_cards_support_query_vars', 0 );
   
 function peach_add_cards_support_link_my_account( $items ) {
-    $items['my-cards'] = 'My Cards';
-    return $items;
+
+	$new_items = [];
+
+    $total_items = count($items);
+	$items_cnt = 0;
+
+    foreach ($items as $key => $value) {
+		$items_cnt++;
+		if(($total_items - $items_cnt) == 1){
+			$new_items['my-cards'] = 'My Cards';
+			if (is_plugin_active('woocommerce-subscriptions/woocommerce-subscriptions.php') || is_plugin_active('woocommerce-subscriptions-pro/woocommerce-subscriptions-pro.php')) {
+				$new_items['update-subscription'] = 'Update Subscription';
+			}
+		}else{
+			$new_items[$key] = $value;
+		}
+    }
+
+	return $new_items;
 } 
 add_filter( 'woocommerce_account_menu_items', 'peach_add_cards_support_link_my_account' );
   
@@ -3282,7 +3432,9 @@ function peach_update_subscription_content() {
 		echo '<p>Subscription not found.</p>';
 	}
 }
-add_action( 'woocommerce_account_update-subscription_endpoint', 'peach_update_subscription_content' );
+if (is_plugin_active('woocommerce-subscriptions/woocommerce-subscriptions.php') || is_plugin_active('woocommerce-subscriptions-pro/woocommerce-subscriptions-pro.php')) {
+	add_action( 'woocommerce_account_update-subscription_endpoint', 'peach_update_subscription_content' );
+}
 
 function updateMyCards($cards, $accesstoken, $secureid, $transaction_mode, $process_checkout_url, $ssl_verifypeer, $success_code){
 
@@ -3726,16 +3878,28 @@ function peach_update_sub_card( $actions, $subscription ) {
 
     return $actions; 
 }
-add_filter( 'wcs_view_subscription_actions', 'peach_update_sub_card', 10, 2 );
-
-add_action( 'wp_loaded','peach_flush_urls' );
-function peach_flush_urls() {
-	
-	if( ! $page = get_page_by_path('my-account/update-subscription') ){
-		flush_rewrite_rules();
-	}
-	
+if (is_plugin_active('woocommerce-subscriptions/woocommerce-subscriptions.php') || is_plugin_active('woocommerce-subscriptions-pro/woocommerce-subscriptions-pro.php')) {
+	add_filter( 'wcs_view_subscription_actions', 'peach_update_sub_card', 10, 2 );
 }
+
+function check_subscription_endpoint() {
+
+	if (!class_exists('WooCommerce')) {
+		return;
+	}
+
+	if (is_plugin_active('woocommerce-subscriptions/woocommerce-subscriptions.php') || 
+		is_plugin_active('woocommerce-subscriptions-pro/woocommerce-subscriptions-pro.php')) {
+
+		$url = wc_get_account_endpoint_url('update-subscription');
+
+		if ( empty($url) ) {
+			add_action('admin_notices', 'woocommerce_peach_wc_subscriptions');
+		}
+	}
+}
+add_action('admin_init', 'check_subscription_endpoint');
+
 
 //Registers WooCommerce Blocks integration.
 function woocommerce_gateway_peach_woocommerce_block_support() {

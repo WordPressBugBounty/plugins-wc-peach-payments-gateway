@@ -2,6 +2,8 @@ div.scroll-util iframe {
 	min-height:600px !important;
 }
 
+.woocommerce-MyAccount-navigation-link--update-subscription {display: none !important;}
+
 .peachCards td, .peachCards th {text-align:center !important;}
 
 .update-card-result {display:inline-block; width:100%;}

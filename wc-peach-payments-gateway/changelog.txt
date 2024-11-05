@@ -1,5 +1,12 @@
 *** Peach Payments Gateway Changelog ***
 
+2024.11.05 - version 3.3.0
+ * Fix - PHP warning when upgrading to latest version of PHP
+ * Enhancement - Only load  CSS and JS front-end assets on cart and checkout
+ * Enhancement - Update Subscription page. Remove flushing of permalinks and rather display admin notice
+ * Fix - Allow for custom "Order IDs" setting when using WooCommerce Sequential Order Numbers Pro plugin
+ * Fix - Refund payments using various checkout methods  
+
 2024.09.25 - version 3.2.9
  * Update - Update card payment endpoints
 
