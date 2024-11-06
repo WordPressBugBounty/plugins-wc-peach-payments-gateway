@@ -6,7 +6,7 @@
  * Author: Peach Payments
  * Text Domain: woocommerce-gateway-peach-payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.0
+ * Version: 3.3.1
  * Requires at least: 6.3
  * Tested up to: 6.5
  */
@@ -192,7 +192,7 @@ function woocommerce_gateway_peach() {
 				$this->request_status_url = 'https://testapi.peachpayments.com/v1/checkout/status';
 				$this->request_pre_status_url = 'https://sandbox-card.peachpayments.com/v1/payments';
 				$this->request_refund_url = 'https://testapi.peachpayments.com/v1/checkout/refund';
-				$this->$request_refund_url_hosted = 'https://testapi.peachpayments.com/v1/checkout/refund';
+				$this->request_refund_url_hosted = 'https://testapi.peachpayments.com/v1/checkout/refund';
 				$this->ssl_verifypeer = false;
 				$this->success_code = '000.100.110';
 			}else{
@@ -201,7 +201,7 @@ function woocommerce_gateway_peach() {
 				$this->request_status_url = 'https://api.peachpayments.com/v1/checkout/status';
 				$this->request_pre_status_url = 'https://card.peachpayments.com/v1/payments';
 				$this->request_refund_url = 'https://api.peachpayments.com/v1/checkout/refund';
-				$this->$request_refund_url_hosted = 'https://api.peachpayments.com/v1/checkout/refund';
+				$this->request_refund_url_hosted = 'https://api.peachpayments.com/v1/checkout/refund';
 				$this->ssl_verifypeer = true;
 				$this->success_code = '000.000.000';
 			}
@@ -2036,7 +2036,7 @@ function woocommerce_gateway_peach() {
 			$secret = $this->secrettoken;
 			$signature = hash_hmac('sha256', $sig_string, $secret);
 
-			$url = $this->$request_refund_url_hosted;
+			$url = $this->request_refund_url_hosted;
 
 			$data = http_build_query([
 				'amount' => $amount,
@@ -2099,7 +2099,7 @@ function woocommerce_gateway_peach() {
 
 			$responseData = $responseCode = '';
 			if($billing_peach[0] == 'other'){
-				$url = $this->$request_refund_url_hosted;
+				$url = $this->request_refund_url_hosted;
 
 				$data = http_build_query([
 					'amount' => $amount,

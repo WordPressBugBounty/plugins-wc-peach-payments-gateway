@@ -1,5 +1,8 @@
 *** Peach Payments Gateway Changelog ***
 
+2024.11.06 - version 3.3.1
+ * Fix - PHP warnings due to undefined variable
+
 2024.11.05 - version 3.3.0
  * Fix - PHP warning when upgrading to latest version of PHP
  * Enhancement - Only load  CSS and JS front-end assets on cart and checkout
