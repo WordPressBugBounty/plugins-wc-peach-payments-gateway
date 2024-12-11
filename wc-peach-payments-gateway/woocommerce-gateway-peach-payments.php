@@ -4,11 +4,11 @@
  * Plugin URI: http://woothemes.com/products/peach-payments/
  * Description: A payment gateway for <a href="https://www.peachpayments.com/">Peach Payments</a>.
  * Author: Peach Payments
- * Text Domain: woocommerce-gateway-peach-payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.1
+ * Version: 3.3.2
  * Requires at least: 6.3
  * Tested up to: 6.5
+ * Text Domain: woocommerce-gateway-peach-payments
  */
  
 if ( ! defined( 'ABSPATH' ) ) {
@@ -19,7 +19,7 @@ if( ! function_exists('get_plugin_data') ){
 	require_once( ABSPATH . 'wp-admin/includes/plugin.php' );
 }
 
-$plugin_data = get_plugin_data( __FILE__ );
+$plugin_data = get_plugin_data( __FILE__ ,true, false);
 
 $version = explode('.', phpversion());
 define( 'WC_PEACH_PHP', $version[0]);
@@ -32,57 +32,7 @@ define( 'WC_PEACH_SITE_URL', get_site_url().'/' );
 define( 'WC_PEACH_README_URL', 'https://plugins.svn.wordpress.org/wc-peach-payments-gateway/trunk/README.txt' );
 define( 'PEACH_FILE', 'wc-peach-payments-gateway/woocommerce-gateway-peach-payments.php' );
 
-//Express Checkout for WC Integration
-if ( is_plugin_active( 'express-checkout-for-woocommerce/express-checkout-for-woocommerce.php' ) ) {
-	if(!isset($_COOKIE['PeachExpressCheckoutPlugin']) || $_COOKIE['PeachExpressCheckoutPlugin'] == ''){
-		setcookie(
-			'PeachExpressCheckoutPlugin',
-			'dontsave',
-			[
-			'expires' => time() + (86400 * 30),
-			'path' => '/',
-			'domain' => '',
-			'secure' => false,
-			'httponly' => false,
-			'samesite' => 'Lax'
-			]
-		);
-	}
-}
-
-function check_peach_manual_checkout_cookie() {
-    if(!isset($_COOKIE['PeachManualCheckout']) || $_COOKIE['PeachManualCheckout'] == ''){
-		setcookie(
-			'PeachManualCheckout',
-			'dontsave',
-			[
-			'expires' => time() + (86400 * 30),
-			'path' => '/',
-			'domain' => '',
-			'secure' => false,
-			'httponly' => false,
-			'samesite' => 'Lax'
-			]
-		);
-	}else{
-		$cookie_val = $_COOKIE['PeachManualCheckout'];
-		setcookie(
-			'PeachManualCheckout',
-			$cookie_val,
-			[
-			'expires' => time() + (86400 * 30),
-			'path' => '/',
-			'domain' => '',
-			'secure' => false,
-			'httponly' => false,
-			'samesite' => 'Lax'
-			]
-		);
-	}
-}
-add_action('wp_footer', 'check_peach_manual_checkout_cookie');
-
-add_action( 'plugins_loaded', 'woocommerce_gateway_peach_init' );
+add_action( 'plugins_loaded', 'woocommerce_gateway_peach_init');
 
 //Paid Membership Pro Integration
 if ( is_plugin_active( 'paid-memberships-pro/paid-memberships-pro.php' ) ) {
@@ -338,7 +288,8 @@ function woocommerce_gateway_peach() {
 						'ZEROPAY'   => 'ZeroPay',
 						'INSTANTEFT' => 'InstantEFT',
 						'BLINKBYEMTEL' => 'Blink by EMTEL',
-						'MCBJUICE' => 'MCB Juice'
+						'MCBJUICE' => 'MCB Juice',
+						'FLOAT' => 'Float'
 					),
 					'default'     => array('VISA','MASTER', 'CAPITECPAY', 'EFTSECURE', 'MOBICRED', 'SCANTOPAY'),
 					'class'       => 'chosen_select checkout_methods',
@@ -384,7 +335,8 @@ function woocommerce_gateway_peach() {
 						'ZEROPAY'   => 'ZeroPay',
 						'INSTANTEFT' => 'InstantEFT',
 						'BLINKBYEMTEL' => 'Blink by EMTEL',
-						'MCBJUICE' => 'MCB Juice'
+						'MCBJUICE' => 'MCB Juice',
+						'FLOAT' => 'Float'
 					),
 					'default'     => array('VISA','MASTER', 'CAPITECPAY', 'EFTSECURE'),
 					'class'       => 'chosen_select consolidated_label_logos',
@@ -1809,7 +1761,7 @@ function woocommerce_gateway_peach() {
 							';
 						}
 						
-						$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL" );
+						$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL", "FLOAT" );
 						$brands_opts = $this->consolidated_label_logos;
 						if($brands_opts && $brands_opts != ''){
 							$brands = array_diff($brands_opts, $brands_exclude);
@@ -2314,6 +2266,10 @@ function woocommerce_gateway_peach() {
 			}
 					
 			$order = wc_get_order( $seqOrderID );
+
+			if ( false === $order){
+				$order = $this->try_generating_order($seqOrderID);
+			}
 	
 			if ( false !== $order && $order_id != '') {
 				$current_order_status = $order->get_status();
@@ -2360,6 +2316,36 @@ function woocommerce_gateway_peach() {
 				$peachpayment_error_message = 'Could not retrieve order information.';
 			}
 	
+		}
+
+		public function try_generating_order($order_id){
+			$alt_post_id = '';
+			global $wpdb;
+			$post_ids = $wpdb->get_col(
+				$wpdb->prepare(
+					"
+						SELECT post_id 
+						FROM {$wpdb->postmeta} 
+						WHERE meta_value = %s 
+						AND meta_key IN (%s, %s)
+						",
+					$order_id, '_order_number', '_order_number_formatted'
+				)
+			);
+
+			if($post_ids){
+				foreach($post_ids as $post_id){
+					$alt_post_id = $post_id;
+				}
+			}
+
+			if($alt_post_id != ''){
+				$post = get_post($alt_post_id);
+				$order = wc_get_order($alt_post_id);
+				return $order;
+			}
+			
+			return false;
 		}
 		
 		public function pp_handle_switch_request( $data ) {
@@ -2542,6 +2528,10 @@ function woocommerce_gateway_peach() {
 			}
 			
 			$order = wc_get_order( $seqOrderID );
+
+			if ( false === $order){
+				$order = $this->try_generating_order($seqOrderID);
+			}
 	
 			// Verify security signature
 			if ( ! $peachpayment_error && ! $peachpayment_done ) {
@@ -2916,7 +2906,6 @@ function woocommerce_gateway_peach() {
 
 }
 
-
 function woocommerce_gateway_peach_init() {
 	
 	//CleanTalk Plugin Compatibility
@@ -2933,8 +2922,6 @@ function woocommerce_gateway_peach_init() {
 	}
 	
 	if ( class_exists( 'WooCommerce' ) ) {
-	
-		load_plugin_textdomain( 'woocommerce-gateway-peach-payments', false, trailingslashit( dirname( plugin_basename( __FILE__ ) ) ) );
 		
 		add_action( 'admin_enqueue_scripts', 'peach_enqueue_admin_scripts' );
 		add_action( 'wp_enqueue_scripts', 'peach_required_scripts' );
@@ -3099,6 +3086,11 @@ function peach_save_extra_details( $post_id, $post ){
     update_post_meta( $post_id, '_billing_peach', wc_clean( $_POST[ '_billing_peach' ] ) );
 }
 add_action( 'woocommerce_process_shop_order_meta', 'peach_save_extra_details', 45, 2 );
+
+function peach_after_setup_theme_funct() {
+	//load_plugin_textdomain( 'woocommerce-gateway-peach-payments', false, trailingslashit( dirname( plugin_basename( __FILE__ ) ) ) );
+} 
+//add_action( 'after_setup_theme', 'peach_after_setup_theme_funct' );
 
 //New My Cards tab on Account Section
 function peach_add_cards_support_endpoint() {
@@ -3358,7 +3350,7 @@ function peach_add_card_content() {
 			</style>
 			';
 			
-			$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL" );
+			$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL", "FLOAT" );
 			$brands_opts = $peachOptions['consolidated_label_logos'];
 			if($brands_opts && $brands_opts != ''){
 				$brands = array_diff($brands_opts, $brands_exclude);

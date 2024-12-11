@@ -1,5 +1,11 @@
 *** Peach Payments Gateway Changelog ***
 
+2024.12.11 - version 3.3.2
+ * Enhancement - Add Float payment method.
+ * Enhancement - Set cookies via JS rather than via WP hooks to ensure "headers already sent" warnings doesn't get triggered.
+ * Fix - Retrieving order object on Switch Webhook request.
+ * Fix - New PHP notice "_load_textdomain_just_in_time".
+
 2024.11.06 - version 3.3.1
  * Fix - PHP warnings due to undefined variable
 

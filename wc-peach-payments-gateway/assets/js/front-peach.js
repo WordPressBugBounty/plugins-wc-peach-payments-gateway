@@ -5,6 +5,20 @@ window.onload = function() {
 };
 
 jQuery( document ).ready(function($) {
+
+	setCookieIfNotExists(['PeachManualCheckout','PeachExpressCheckoutPlugin']);
+
+	function setCookieIfNotExists(peach_cookies) {
+		peach_cookies.forEach(function(cookieName) {
+			console.log(cookieName);
+			var cookieValue = getCookie(cookieName);
+			if (!cookieValue) {
+				setCookie(cookieName, 'dontsave', 1);
+			}else{
+				setCookie(cookieName, cookieValue, 1);
+			}
+		});
+    }
 	
 	$('.peach-update-card').on( 'click', function(e) {
 		e.preventDefault();

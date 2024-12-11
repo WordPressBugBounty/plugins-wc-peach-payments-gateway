@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.3
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 3.3.1
-Version: 3.3.1
+Stable tag: 3.3.2
+Version: 3.3.2
 License: GPLv3
 
 
@@ -44,6 +44,12 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 3.3.2 =
+ * Enhancement - Add Float payment method.
+ * Enhancement - Set cookies via JS rather than via WP hooks to ensure "headers already sent" warnings doesn't get triggered.
+ * Fix - Retrieving order object on Switch Webhook request.
+ * Fix - New PHP notice "_load_textdomain_just_in_time".
 
 = 3.3.1 =
  * Fix - PHP warnings due to undefined variable
