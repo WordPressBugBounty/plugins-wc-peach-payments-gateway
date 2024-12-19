@@ -1,5 +1,8 @@
 *** Peach Payments Gateway Changelog ***
 
+2024.12.19 - version 3.3.3
+ * Fix - Select correct payment type code for subscription payments
+
 2024.12.11 - version 3.3.2
  * Enhancement - Add Float payment method.
  * Enhancement - Set cookies via JS rather than via WP hooks to ensure "headers already sent" warnings doesn't get triggered.

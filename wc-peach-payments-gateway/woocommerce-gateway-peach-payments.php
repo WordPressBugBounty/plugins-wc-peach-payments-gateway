@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.2
+ * Version: 3.3.3
  * Requires at least: 6.3
  * Tested up to: 6.5
  * Text Domain: woocommerce-gateway-peach-payments

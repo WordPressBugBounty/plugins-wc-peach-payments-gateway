@@ -124,7 +124,7 @@ function checkCheckoutBtn(){
 	var option_select = jQuery("input[name='peach_payment_id']:checked").val();
 
 	setCookie('PeachManualCheckout', option_select, 1);
-	//setCookie('PeachExpressCheckoutPlugin', option_select, 1);
+	setCookie('PeachExpressCheckoutPlugin', option_select, 1);
 	
 	setTimeout(
 	function() 
