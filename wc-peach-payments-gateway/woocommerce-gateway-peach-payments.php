@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.3
+ * Version: 3.3.4
  * Requires at least: 6.3
  * Tested up to: 6.5
  * Text Domain: woocommerce-gateway-peach-payments
@@ -750,6 +750,10 @@ function woocommerce_gateway_peach() {
 			
 			$order = wc_get_order($bearerOrderID);
 
+			if ( false === $order){
+				$order = $this->try_generating_order($bearerOrderID);
+			}
+
 			$logger_info['orderafter'] = $order;
 			
 			if(isset($_GET['id']) && isset($_GET['resourcePath'])){
@@ -815,6 +819,10 @@ function woocommerce_gateway_peach() {
 						}
 						
 						$orderNew = wc_get_order( $seqOrderID );
+
+						if ( false === $orderNew){
+							$orderNew = $this->try_generating_order($seqOrderID);
+						}
 						
 						$alt_peach_status = str_replace('wc-', '', $this->peach_order_status);
 						$proceed = true;
@@ -849,6 +857,7 @@ function woocommerce_gateway_peach() {
 						$woocommerce->cart->empty_cart();
 						
 						add_post_meta( $seqOrderID, 'payment_order_id', $response->id );
+						add_post_meta( $seqOrderID, 'peach_api_trigger', 'process_payment' );
 						update_post_meta($seqOrderID, "_checkout_payment_option", $paymentBrand);
 						
 						if ( is_user_logged_in() ) {
@@ -953,6 +962,7 @@ function woocommerce_gateway_peach() {
 						
 						update_post_meta( $status[1], 'payment_order_id', $status[2] );
 						update_post_meta( $status[1], "_checkout_payment_option", $status[3]);
+						add_post_meta( $seqOrderID, 'peach_api_trigger', 'process_payment' );
 						
 						wp_safe_redirect($this->order_received_page_url.'/'.$orderNew->get_id().'/?key='.$orderNew->get_order_key() );
 						exit;
@@ -1000,6 +1010,10 @@ function woocommerce_gateway_peach() {
 					}
 					
 					$orderNew = wc_get_order( $seqOrderID );
+
+					if ( false === $orderNew){
+						$orderNew = $this->try_generating_order($seqOrderID);
+					}
 						
 					if($_POST['result_code'] == $this->success_code){
 						
@@ -1036,6 +1050,7 @@ function woocommerce_gateway_peach() {
 						$woocommerce->cart->empty_cart();
 						
 						add_post_meta( $seqOrderID, 'payment_order_id', $_POST['id'] );
+						add_post_meta( $seqOrderID, 'peach_api_trigger', 'process_payment' );
 						update_post_meta($seqOrderID, "_checkout_payment_option", $paymentBrand);
 						
 						wp_safe_redirect( $this->order_received_page_url.'/'.$orderNew->get_id().'/?key='.$orderNew->get_order_key() );
@@ -1132,8 +1147,28 @@ function woocommerce_gateway_peach() {
 			$logger = wc_get_logger();
 			$logger_info = array();
 			$logger_info['settings'] = $this->logger_info_settings;
+
+			//FH 20250121 edit
+			if($order_id){
+				
+			}else{
+				$logger_info['errors'] = 'OrderID not passed on thankyuou.';
+				$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-peach-thankyou' ) );
+			}
+
+			$seqOrderID = $order_id;
+			if($this->orderids != 'yes'){
+				$plugin_support = new pluginSupport();
+				$seqOrderID = $plugin_support->sequentialNumbers($order_id, 1);
+			}
 			
-			$order = wc_get_order( $order_id );
+			$order = wc_get_order( $seqOrderID );
+
+			if ( false === $order){
+				$order = $this->try_generating_order($seqOrderID);
+			}
+			//
+			
 			$is_order = $this->validate_order($order);
 			
 			if($is_order){
@@ -1178,7 +1213,8 @@ function woocommerce_gateway_peach() {
 			
 			if(isset($this->recurringid) && $this->recurringid != ''){
 				$url = $this->process_checkout_url."/v1/registrations/".$id."/payments";
-				$data = "entityId=" .$this->recurringid.
+				$data = "entityId=".$this->recurringid.
+							"&merchantTransactionId=" .$order_id.
 							"&amount=" .$amount.
 							"&currency=" .$renewal_order->get_currency().
 							"&paymentType=DB" .
@@ -1542,7 +1578,7 @@ function woocommerce_gateway_peach() {
 							
 							$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-embedded-checkout' ) );
 							$order->add_order_note($embed_order_note,0,false);
-							wc_add_notice(  'Peach Payments can\'t process the embedded checkout at the moment.', 'error' );
+							wc_add_notice(  'Invalid phone number. Must be 5-24 characters.', 'error' );
 							wp_safe_redirect($this->checkout_page_url);
 							exit;
 						}else{
@@ -1556,7 +1592,7 @@ function woocommerce_gateway_peach() {
 					$billing_address = str_replace('&', ' ',$billing_address);
 					$billing_address = str_replace('.', '',$billing_address);
 					
-					$data = "entityId=". $this->secureid .
+					$data = "entityId=".$this->secureid.
 							"&amount=" .$order->get_total().
 							"&currency=" .$order->get_currency().
 							"&customParameters[SHOPPER_pluginVersion]=".WC_PEACH_VER.
@@ -2377,7 +2413,11 @@ function woocommerce_gateway_peach() {
 				$seqOrderID = $plugin_support->sequentialNumbers($order_id, 1);
 			}
 			
-			$order          = wc_get_order( $seqOrderID );
+			$order  = wc_get_order( $seqOrderID );
+
+			if ( false === $order){
+				$order = $this->try_generating_order($seqOrderID);
+			}
 	
 			// Verify security signature
 			if ( ! $peachpayment_error && ! $peachpayment_done ) {
@@ -2469,21 +2509,51 @@ function woocommerce_gateway_peach() {
 		public function handle_switch_payment_failed( $data, $order ) {
 			
 			$alt_peach_status = str_replace('wc-', '', $this->peach_order_status);
+			$default_statusses = ['wc-processing','processing','wc-on-hold','on-hold','wc-completed','completed','wc-refunded','refunded',$this->peach_order_status,$alt_peach_status,'wc-checkout-draft','checkout-draft','wc-failed','failed','wc-cancelled','cancelled','wc-pending','pending'];
+			$unique_statusses = array_unique($default_statusses);
+			if(!in_array($status,$unique_statusses)){
+				$status_check = 'unique';
+			}
+
 			$proceed = true;
 			
 			switch ($order->get_status()) {
-			  case 'completed':
-				$proceed = false;
-				break;
-			  case $this->peach_order_status:
-				$proceed = false;
-				break;
-			  case $alt_peach_status:
-				$proceed = false;
-				break;
-			  default:
-				$proceed = true;
-			}
+				case 'completed':
+					$proceed = false;
+					break;
+				case 'wc-completed':
+					$proceed = false;
+					break;
+				case $this->peach_order_status:
+					$proceed = false;
+					break;
+				case $alt_peach_status:
+					$proceed = false;
+					break;
+				case 'on-hold':
+					$proceed = false;
+					break;
+				case 'wc-on-hold':
+					$proceed = false;
+					break;
+				case 'refunded':
+					$proceed = false;
+					break;
+				case 'wc-refunded':
+					$proceed = false;
+					break;
+				case 'processing':
+					$proceed = false;
+					break;
+				case 'wc-processing':
+					$proceed = false;
+					break;
+				case 'unique':
+					$proceed = false;
+					break;
+				default:
+					$proceed = true;
+				}
 			
 			if($proceed){
 				$order->add_order_note( 'Peach Payment via Switch Webhook Successfull.',0,false);
@@ -2531,6 +2601,12 @@ function woocommerce_gateway_peach() {
 
 			if ( false === $order){
 				$order = $this->try_generating_order($seqOrderID);
+			}
+
+			$peach_api_trigger = get_post_meta( $order->get_id(), 'peach_api_trigger', true );
+			if($peach_api_trigger && $peach_api_trigger != ''){
+				$peachpayment_done = true;
+				$order->add_order_note( 'Peach API already trigged success. Not continuing with Switch Webhook request.',0,false);
 			}
 	
 			// Verify security signature
@@ -2615,6 +2691,7 @@ function woocommerce_gateway_peach() {
 					if ($resultCode == $this->success_code) {
 						$order->add_order_note( 'Peach Payment via Switch Webhook Successfull.',0,false);
 						$order->update_status($this->peach_order_status, __( 'Peach Switch Webhook ['.$status.']['.$data['result_code'].']:'.woocommerce_clean($data['result_description']).'. ', 'woocommerce' ));
+						add_post_meta( $seqOrderID, 'peach_api_trigger', 'swith_webhook_request' );
 					}else if($resultCode == '000.200.000' || $resultCode == '000.200.100'){
 
 					}else{
@@ -2634,26 +2711,61 @@ function woocommerce_gateway_peach() {
 		}
 		
 		public function handle_switch_payment_complete( $data, $order ) {
-			
+			$status_check = $order->get_status();
 			$alt_peach_status = str_replace('wc-', '', $this->peach_order_status);
+			$default_statusses = ['wc-processing','processing','wc-on-hold','on-hold','wc-completed','completed','wc-refunded','refunded',$this->peach_order_status,$alt_peach_status,'wc-checkout-draft','checkout-draft','wc-failed','failed','wc-cancelled','cancelled','wc-pending','pending'];
+			$unique_statusses = array_unique($default_statusses);
+			if(!in_array($status_check,$unique_statusses)){
+				$status_check = 'unique';
+			}
+
 			$proceed = true;
 			
-			switch ($order->get_status()) {
-			  case 'completed':
-				$proceed = false;
-				break;
-			  case $this->peach_order_status:
-				$proceed = false;
-				break;
-			  case $alt_peach_status:
-				$proceed = false;
-				break;
-			  default:
-				$proceed = true;
+			switch ($status_check) {
+				case 'completed':
+					$proceed = false;
+					break;
+				case 'wc-completed':
+					$proceed = false;
+					break;
+				case $this->peach_order_status:
+					$proceed = false;
+					break;
+				case $alt_peach_status:
+					$proceed = false;
+					break;
+				case 'on-hold':
+					$proceed = false;
+					break;
+				case 'wc-on-hold':
+					$proceed = false;
+					break;
+				case 'refunded':
+					$proceed = false;
+					break;
+				case 'wc-refunded':
+					$proceed = false;
+					break;
+				case 'processing':
+					$proceed = false;
+					break;
+				case 'wc-processing':
+					$proceed = false;
+					break;
+				case 'unique':
+					$proceed = false;
+					break;
+				default:
+					$proceed = true;
 			}
 			
-			if($proceed){
+			$peach_api_trigger = get_post_meta( $order->get_id(), 'peach_api_trigger', true );
+
+			if($peach_api_trigger && $peach_api_trigger != ''){
+				$order->add_order_note( 'Peach API already trigged success. Not continuing with Switch Payment Complete request.',0,false);
+			}else if($proceed){
 				$order->add_order_note( 'Peach Payment via Switch Webhook Successfull.',0,false);
+				add_post_meta( $order->get_id(), 'peach_api_trigger', 'process_payment' );
 				$order->update_status($this->peach_order_status, __( 'Peach Switch Webhook:'.woocommerce_clean($data['result_description']).'. ', 'woocommerce' ));
 			}
 					
@@ -2741,6 +2853,11 @@ function woocommerce_gateway_peach() {
 			}
 			
 			$order    = wc_get_order( $seqOrderID );
+
+			if ( false === $order){
+				$order = $this->try_generating_order($seqOrderID);
+			}
+
 			$resultType=esc_html($resultArray->type);
 			if($resultType=='PAYMENT'){
 				$statusCode = $this->handle_payon_all_payment($parsed_response,$order);
@@ -2759,23 +2876,57 @@ function woocommerce_gateway_peach() {
 				$force_complete = false;
 				
 				$alt_peach_status = str_replace('wc-', '', $this->peach_order_status);
+				$default_statusses = ['wc-processing','processing','wc-on-hold','on-hold','wc-completed','completed','wc-refunded','refunded',$this->peach_order_status,$alt_peach_status,'wc-checkout-draft','checkout-draft','wc-failed','failed','wc-cancelled','cancelled','wc-pending','pending'];
+				$unique_statusses = array_unique($default_statusses);
+				if(!in_array($current_order_status,$unique_statusses)){
+					$current_order_status = 'unique';
+				}
+
 				$proceed = true;
 				
 				switch ($current_order_status) {
-				  case 'completed':
-					$proceed = false;
-					break;
-				  case $this->peach_order_status:
-					$proceed = false;
-					break;
-				  case $alt_peach_status:
-					$proceed = false;
-					break;
-				  default:
-					$proceed = true;
+					case 'completed':
+						$proceed = false;
+						break;
+					case 'wc-completed':
+						$proceed = false;
+						break;
+					case $this->peach_order_status:
+						$proceed = false;
+						break;
+					case $alt_peach_status:
+						$proceed = false;
+						break;
+					case 'on-hold':
+						$proceed = false;
+						break;
+					case 'wc-on-hold':
+						$proceed = false;
+						break;
+					case 'refunded':
+						$proceed = false;
+						break;
+					case 'wc-refunded':
+						$proceed = false;
+						break;
+					case 'processing':
+						$proceed = false;
+						break;
+					case 'wc-processing':
+						$proceed = false;
+						break;
+					case 'unique':
+						$proceed = false;
+						break;
+					default:
+						$proceed = true;
 				}
 				
-				if($proceed){
+				$peach_api_trigger = get_post_meta( $order->get_id(), 'peach_api_trigger', true );
+
+				if($peach_api_trigger && $peach_api_trigger != ''){
+					$order->add_order_note( 'Peach API already trigged success. Not continuing with Payon Webhook request.',0,false);
+				}else if($proceed){
 					 
 					if ( $parsed_response->paymentType  == 'DB' || $parsed_response->paymentType  == 'PA' ) {
 						
@@ -2792,6 +2943,10 @@ function woocommerce_gateway_peach() {
 						}
 							
 						$order = wc_get_order( $seqOrderID );
+
+						if ( false === $order){
+							$order = $this->try_generating_order($seqOrderID);
+						}
 						
 						if ( preg_match('/^(000\.400\.0[^3]|000\.400\.100)/',$parsed_response->result->code) || preg_match('/^(000\.000\.|000\.100\.1|000\.[36])/',$parsed_response->result->code)) {
 							
@@ -2802,6 +2957,7 @@ function woocommerce_gateway_peach() {
 							
 							$order->add_order_note( 'Peach Payment via Payon Webhook Successfull.',0,false);
 							$order->update_status($this->peach_order_status, __( 'Peach Payon Webhook:'.$parsed_response->result->description.'. ', 'woocommerce' ));
+							add_post_meta( $seqOrderID, 'peach_api_trigger', 'payon' );
 							return true;
 							
 						} 
@@ -3289,7 +3445,7 @@ function peach_add_card_content() {
 	}else{
 		$url = $process_checkout_url."/v1/checkouts";
 		
-		$data = "entityId=". $secureid .
+		$data = "entityId=".$secureid.
 		"&amount=1.00" .
 		"&currency=ZAR" .
 		"&customer.givenName=" .$current_user->user_firstname .
@@ -3587,6 +3743,7 @@ function peachEmbedUpdateOrder_funct(){
 		if($status == 'complete' && $code == '000.100.110'){
 			$order->add_order_note( 'Peach Embedded Payment Successfull.',0,false);
 			$order->update_status('processing', __( 'Order being processed.', 'woocommerce' ));
+			add_post_meta( $id, 'peach_api_trigger', 'process_embedded' );
 			$return_url = $order->get_checkout_order_received_url();
 		}else if($status == 'cancelled'){
 			$order->add_order_note( 'Peach Embedded Payment Cancelled.',0,false);
@@ -3811,6 +3968,14 @@ add_action('wp_ajax_peach_card_sync', 'peach_card_sync_funct');
 
 //Set a minimum order amount for checkout
 function wc_minimum_order_amount() {
+	$peachOptions = get_option('woocommerce_peach-payments_settings');
+	$embed_payments = $peachOptions['embed_payments'];
+
+	$logger = wc_get_logger();
+	$logger_info = array();
+	$logger_info['settings'] = $embed_payments;
+	$logger_info['phone'] = $_POST['billing_phone'];
+	
     // Set this variable to specify a minimum order value
     $minimum = 1;
 
@@ -3836,8 +4001,75 @@ function wc_minimum_order_amount() {
 
         }
     }
+
+	if($embed_payments && $embed_payments == "yes"){
+		$val = false;
+		if (isset($_POST['billing_peach']) && $_POST['billing_peach'] == "other") {
+			$val = true;
+		}else if(isset($_COOKIE['PeachManualCheckout']) && $_COOKIE['PeachManualCheckout'] == 'other'){
+			$val = true;
+		}else if(isset($_COOKIE['PeachExpressCheckoutPlugin']) && $_COOKIE['PeachExpressCheckoutPlugin'] == 'other'){
+			$val = true;
+		}
+
+		if($val){
+			if (isset($_POST['billing_phone']) && !empty($_POST['billing_phone'])) {
+				$phone = sanitize_text_field($_POST['billing_phone']);
+
+				// Example: Validate if the phone number contains only digits and has 10-15 characters
+				//!preg_match('/^\+?[0-9]{5,24}$/', $phone)
+				if (! preg_match( '/^.{5,24}$/', $phone ) ) {
+					wc_add_notice(__('Please enter a valid phone number (5-24 digits, optional "+").', 'woocommerce'), 'error');
+					$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-validate' ) );
+				}
+			} else {
+				wc_add_notice(__('Phone number is required.', 'woocommerce'), 'error');
+				$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-validate' ) );
+			}
+		}
+	}
+
 }
 add_action( 'woocommerce_checkout_process', 'wc_minimum_order_amount' );
+
+//WC Checkout Blocks Validation
+add_filter('woocommerce_store_api_checkout_update_order_from_request', function ($order, $request) {
+	$billing_data = $request->get_param('billing_address');
+	$billing_peach = $request->get_param('billing_peach');
+	$selected_payment_method = $request->get_param('payment_method');
+	$billing_phone = $billing_data['phone'];
+
+	$peachOptions = get_option('woocommerce_peach-payments_settings');
+	$embed_payments = $peachOptions['embed_payments'];
+
+	if($embed_payments && $embed_payments == "yes" && $selected_payment_method == 'peach-payments'){
+		$val = false;
+		if(null !== $billing_peach && $billing_peach == "other"){
+			$val = true;
+		}else if(isset($_COOKIE['PeachManualCheckout']) && $_COOKIE['PeachManualCheckout'] == 'other'){
+			$val = true;
+		}else if(isset($_COOKIE['PeachExpressCheckoutPlugin']) && $_COOKIE['PeachExpressCheckoutPlugin'] == 'other'){
+			$val = true;
+		}
+
+		if($val){
+			if ( null !== $billing_phone && $billing_phone != '' ){
+				$phone = sanitize_text_field( $billing_phone );
+				if (!preg_match( '/^.{5,24}$/', $phone )){
+					wc_add_notice(__('Please enter a valid phone number (5-24 digits, optional "+").', 'woocommerce'), 'error');
+				}
+			} else {
+				if ( null === $billing_phone || $billing_phone == '' ){
+					wc_add_notice(__('Phone number is required.', 'woocommerce'), 'error');
+				}
+			}
+		}
+	}
+
+    return $order;
+
+}, 10, 2 );
+
 
 function mp_checks_funct(){
 	global $wpdb;

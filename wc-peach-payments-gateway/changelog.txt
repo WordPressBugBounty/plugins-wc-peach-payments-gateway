@@ -1,5 +1,10 @@
 *** Peach Payments Gateway Changelog ***
 
+2025.02.27 - version 3.3.4
+ * Fix - Removed unwanted spacing in the codebase that caused 400 errors.
+ * Enhancement - Added a check to verify if Peach Webhooks have been triggered.
+ * Update - Included Order ID in the payload for recurring payments.
+
 2024.12.19 - version 3.3.3
  * Fix - Select correct payment type code for subscription payments
 
