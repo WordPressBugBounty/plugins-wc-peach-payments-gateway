@@ -5,9 +5,9 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.4
- * Requires at least: 6.3
- * Tested up to: 6.5
+ * Version: 3.3.5
+ * Requires at least: 6.8
+ * Tested up to: 6.8
  * Text Domain: woocommerce-gateway-peach-payments
  */
  
@@ -926,7 +926,7 @@ function woocommerce_gateway_peach() {
 							]
 						);
 					}
-					if(isset($status) && $status[0] == $this->success_code){
+					if(isset($status) && ($status[0] == $this->success_code || $status[0] == '000.000.100')){
 						$orderNew = wc_get_order( $status[1] );
 						
 						$alt_peach_status = str_replace('wc-', '', $this->peach_order_status);
@@ -1474,6 +1474,7 @@ function woocommerce_gateway_peach() {
 					}else{
 						$embed_errors = false;
 						$embed_keys = false;
+						$embed_error_txt = '';
 						$embed = new embeddedCheckout();
 						if($this->embed_clientid == '' || $this->embed_clientsecret == '' || $this->embed_merchantid == ''){
 							$embed_errors = true;
@@ -1481,6 +1482,7 @@ function woocommerce_gateway_peach() {
 								'order' => $order_id,
 								'embed_token' => 'error',
 							);
+							$embed_error_txt = 'Invalid System Configuration. Please contact Support.';
 						}else{
 							$embed_keys = true;
 							$embed_token = $embed->get_access_token($this->transactionmode, $this->embed_clientid, $this->embed_clientsecret, $this->embed_merchantid, 'auth');
@@ -1492,10 +1494,13 @@ function woocommerce_gateway_peach() {
 									'order' => $order_id,
 									'embed_token' => 'token error',
 								);
+
+								$embed_error_txt = 'Invalid System Token. Please contact Support.';
 							}
 						}
 						
 						$logger_info['embed_result'] = $embed_checkout_instance;
+						$logger_info['embed_text'] = $embed_error_txt;
 						
 						if($embed_checkout_instance != 'error'){
 							$success_url = $order->get_checkout_order_received_url();
@@ -1572,13 +1577,18 @@ function woocommerce_gateway_peach() {
 						
 						if($embed_errors){
 							$embed_order_note = 'Peach Embedded Checkout Error.';
+							$embed_error_txt = 'Peach Checkout Error. Please contact Support.';
 							if(!$embed_keys){
 								$embed_order_note = 'Peach Embedded Missing Account Keys.';
+								$embed_error_txt = 'Missing Account Keys. Please contact Support.';
 							}
 							
 							$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-embedded-checkout' ) );
 							$order->add_order_note($embed_order_note,0,false);
-							wc_add_notice(  'Invalid phone number. Must be 5-24 characters.', 'error' );
+							if($embed_error_txt == ''){
+								$embed_error_txt = 'Invalid phone number. Must be 5-24 characters.';
+							}
+							wc_add_notice($embed_error_txt, 'error' );
 							wp_safe_redirect($this->checkout_page_url);
 							exit;
 						}else{
@@ -1598,7 +1608,8 @@ function woocommerce_gateway_peach() {
 							"&customParameters[SHOPPER_pluginVersion]=".WC_PEACH_VER.
 							"&customer.givenName=" .$order->get_billing_first_name().
 							"&customer.surname=" .$order->get_billing_last_name().
-							"&customer.ip=" .$order->get_customer_ip_address().
+							//"&customer.ip=" .$order->get_customer_ip_address().
+							"&customer.ip=" .$_SERVER['REMOTE_ADDR'].
 							"&customer.email=" .$order->get_billing_email().
 							"&customer.phone=" .$order->get_billing_phone().
 							"&billing.street1=" .$billing_address.
