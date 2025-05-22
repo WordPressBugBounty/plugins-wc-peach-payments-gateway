@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 3.3.5
-Version: 3.3.5
+Stable tag: 3.3.6
+Version: 3.3.6
 License: GPLv3
 
 
@@ -44,6 +44,9 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 3.3.6 =
+ * Fix - Retry of Subscription payments on initial fail result.
 
 = 3.3.5 =
  * Fix - Retrieve customer IP address.

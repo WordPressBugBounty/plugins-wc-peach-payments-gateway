@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.5
+ * Version: 3.3.6
  * Requires at least: 6.8
  * Tested up to: 6.8
  * Text Domain: woocommerce-gateway-peach-payments
@@ -862,7 +862,7 @@ function woocommerce_gateway_peach() {
 						
 						if ( is_user_logged_in() ) {
 							if(isset($response->registrationId) && $response->registrationId != ''){
-								add_post_meta( $seqOrderID, 'payment_registration_id', $response->registrationId );
+								update_post_meta( $seqOrderID, 'payment_registration_id', $response->registrationId );
 								
 								$newCard = array(
 									'id' => $response->registrationId,
@@ -906,6 +906,14 @@ function woocommerce_gateway_peach() {
 						
 						$orderNew = wc_get_order( $orderID );
 						$orderNew->add_order_note( 'Peach Error #'.$resultCode.'. '.$resultDescription,0,false );
+						
+						$my_response = json_decode($responseData, true);
+						if($my_response['registrationId'] && $my_response['registrationId'] != ''){
+							if($my_response['standingInstruction']['type'] == 'RECURRING'){
+								update_post_meta( $orderID, 'payment_registration_id', $my_response['registrationId'] );
+							}
+						}
+
 						wc_add_notice(  'Please try again. '.$resultDescription, 'error' );
 						wp_safe_redirect( $this->order_pay_page_url.'/'.$orderNew->get_id().'/?key='.$orderNew->get_order_key() );
 						exit;
@@ -1335,22 +1343,7 @@ function woocommerce_gateway_peach() {
 			$user_id = '';
 			$nonce = wp_create_nonce( $order->get_order_key().'_'.time() );
 			
-			if(isset($_COOKIE['PeachExpressCheckoutPlugin']) && $_COOKIE['PeachExpressCheckoutPlugin'] !== ''){
-				$payOption = $_COOKIE['PeachExpressCheckoutPlugin'];
-				$order->update_meta_data( '_billing_peach', $payOption );
-				setcookie(
-					'PeachExpressCheckoutPlugin',
-					'',
-					[
-					'expires' => time() + (86400 * 30),
-					'path' => '/',
-					'domain' => '',
-					'secure' => false,
-					'httponly' => false,
-					'samesite' => 'Lax'
-					]
-				);
-			}else if(isset($_COOKIE['PeachManualCheckout']) && $_COOKIE['PeachManualCheckout'] !== ''){
+			if(isset($_COOKIE['PeachManualCheckout']) && $_COOKIE['PeachManualCheckout'] !== ''){
 				$payOption = $_COOKIE['PeachManualCheckout'];
 				$order->update_meta_data( '_billing_peach', $_COOKIE['PeachManualCheckout'] );
 				setcookie(
@@ -1366,6 +1359,21 @@ function woocommerce_gateway_peach() {
 					]
 				);
 				
+			}else if(isset($_COOKIE['PeachExpressCheckoutPlugin']) && $_COOKIE['PeachExpressCheckoutPlugin'] !== ''){
+				$payOption = $_COOKIE['PeachExpressCheckoutPlugin'];
+				$order->update_meta_data( '_billing_peach', $payOption );
+				setcookie(
+					'PeachExpressCheckoutPlugin',
+					'',
+					[
+					'expires' => time() + (86400 * 30),
+					'path' => '/',
+					'domain' => '',
+					'secure' => false,
+					'httponly' => false,
+					'samesite' => 'Lax'
+					]
+				);
 			}else if(null !== $order->get_meta('_billing_peach') && $order->get_meta('_billing_peach') != ''){
 				$payOption = $order->get_meta('_billing_peach');
 			}else{
@@ -1373,6 +1381,11 @@ function woocommerce_gateway_peach() {
 				wc_add_notice(  'Error - Checkout could not detect your selected payment option.', 'error' );
 				wp_safe_redirect($this->checkout_page_url);
 				exit;
+			}
+
+			$my_registration_id = get_post_meta($order_id, 'payment_registration_id', true );
+			if($my_registration_id && $my_registration_id != '' && $payOption == 'dontsave'){
+				$payOption = 'saveinfo';
 			}
 			
 			if($payOption && $payOption != ''){
@@ -1618,6 +1631,7 @@ function woocommerce_gateway_peach() {
 							"&billing.country=" .$order->get_billing_country();
 							
 					if($payOption == 'saveinfo'){
+
 						$data .= "&createRegistration=true";
 						$data .= "&paymentType=" .$paymentType;
 						$data .= "&merchantTransactionId=" .$seqOrderID;
@@ -1625,6 +1639,7 @@ function woocommerce_gateway_peach() {
 						$check_subscribe = $this->check_subscriptions();
 						
 						if($check_subscribe[0]){ //Subscuption Products Found
+
 							$subscriptions = wcs_get_subscriptions_for_order( $order_id);
 							$subscr_info = $this->getSubscriptionInfo($subscriptions);
 						
@@ -2963,7 +2978,7 @@ function woocommerce_gateway_peach() {
 							
 							//FH Update 20231219
 							if(isset($parsed_response->registrationId) && $parsed_response->registrationId != ''){
-								add_post_meta( $seqOrderID, 'payment_registration_id', $parsed_response->registrationId );
+								update_post_meta( $seqOrderID, 'payment_registration_id', $parsed_response->registrationId );
 							}
 							
 							$order->add_order_note( 'Peach Payment via Payon Webhook Successfull.',0,false);

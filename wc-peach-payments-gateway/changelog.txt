@@ -1,5 +1,8 @@
 *** Peach Payments Gateway Changelog ***
 
+2025.05.22 - version 3.3.6
+ * Fix - Retry of Subscription payments on initial fail result.
+
 2025.05.05 - version 3.3.5
  * Fix - Retrieve customer IP address.
  * Update - Improved embedded checkout error messages.
