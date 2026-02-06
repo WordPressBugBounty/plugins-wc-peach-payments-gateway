@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 3.3.6
+ * Version: 3.3.7
  * Requires at least: 6.8
  * Tested up to: 6.8
  * Text Domain: woocommerce-gateway-peach-payments
@@ -289,7 +289,8 @@ function woocommerce_gateway_peach() {
 						'INSTANTEFT' => 'InstantEFT',
 						'BLINKBYEMTEL' => 'Blink by EMTEL',
 						'MCBJUICE' => 'MCB Juice',
-						'FLOAT' => 'Float'
+						'FLOAT' => 'Float',
+						'MAUCAS' => 'MauCAS'
 					),
 					'default'     => array('VISA','MASTER', 'CAPITECPAY', 'EFTSECURE', 'MOBICRED', 'SCANTOPAY'),
 					'class'       => 'chosen_select checkout_methods',
@@ -336,7 +337,8 @@ function woocommerce_gateway_peach() {
 						'INSTANTEFT' => 'InstantEFT',
 						'BLINKBYEMTEL' => 'Blink by EMTEL',
 						'MCBJUICE' => 'MCB Juice',
-						'FLOAT' => 'Float'
+						'FLOAT' => 'Float',
+						'MAUCAS' => 'MauCAS'
 					),
 					'default'     => array('VISA','MASTER', 'CAPITECPAY', 'EFTSECURE'),
 					'class'       => 'chosen_select consolidated_label_logos',
@@ -619,9 +621,11 @@ function woocommerce_gateway_peach() {
 										$methodName = 'Capitec Pay';
 									}else if($value == 'MCBJUICE'){
 										$methodName = 'MCB Juice';
+									}else if($value == 'MAUCAS'){
+										$methodName = 'MauCAS';
 									}
 									
-									if($index < 4){
+									if($index < 6){
 										$payIcons .= '<div class="peach-method"><img name="" src="'.WC_PEACH_PLUGIN_URL.'/assets/images/'.$value.'.png" width="38" height="20" alt="" /><div class="peach-method-tooltip">'.$methodName.'</div></div>';
 									}else{
 										$payIconsPop[] = $methodName;
@@ -792,6 +796,17 @@ function woocommerce_gateway_peach() {
 						$resultDescription = $response->result->description;
 					}
 					curl_close($ch);
+					
+					$InitiatedTransactionID = '';
+					if (isset($response->resultDetails)) {
+						if (isset($response->resultDetails->CardholderInitiatedTransactionID)) {
+							$InitiatedTransactionID = $response->resultDetails->CardholderInitiatedTransactionID;
+						}
+					}else if(isset($response->standingInstruction)){
+						if(isset($response->standingInstruction->initialTransactionId)){
+							$InitiatedTransactionID = $response->standingInstruction->initialTransactionId;
+						}
+					}
 				
 					$paymentBrand = '';
 					$paymentType = '';
@@ -858,7 +873,8 @@ function woocommerce_gateway_peach() {
 						
 						add_post_meta( $seqOrderID, 'payment_order_id', $response->id );
 						add_post_meta( $seqOrderID, 'peach_api_trigger', 'process_payment' );
-						update_post_meta($seqOrderID, "_checkout_payment_option", $paymentBrand);
+						update_post_meta($seqOrderID, "_checkout_payment_option", $paymentBrand); //$InitiatedTransactionID
+						update_post_meta($seqOrderID, "payment_initial_id", $InitiatedTransactionID);
 						
 						if ( is_user_logged_in() ) {
 							if(isset($response->registrationId) && $response->registrationId != ''){
@@ -972,6 +988,10 @@ function woocommerce_gateway_peach() {
 						update_post_meta( $status[1], "_checkout_payment_option", $status[3]);
 						add_post_meta( $seqOrderID, 'peach_api_trigger', 'process_payment' );
 						
+						if(isset($status[4])){
+							update_post_meta($status[1], "payment_initial_id", $status[4]);
+						}
+						
 						wp_safe_redirect($this->order_received_page_url.'/'.$orderNew->get_id().'/?key='.$orderNew->get_order_key() );
 						exit;
 					}else{
@@ -1060,6 +1080,19 @@ function woocommerce_gateway_peach() {
 						add_post_meta( $seqOrderID, 'payment_order_id', $_POST['id'] );
 						add_post_meta( $seqOrderID, 'peach_api_trigger', 'process_payment' );
 						update_post_meta($seqOrderID, "_checkout_payment_option", $paymentBrand);
+						
+						$InitiatedTransactionID = '';
+						if (isset($_POST['resultDetails'])) {
+							if (isset($_POST['resultDetails']['CardholderInitiatedTransactionID'])) {
+								$InitiatedTransactionID = $_POST['resultDetails']['CardholderInitiatedTransactionID'];
+							}
+						}else if(isset($_POST['standingInstruction'])){
+							if(isset($_POST['standingInstruction']['initialTransactionId'])){
+								$InitiatedTransactionID = $_POST['standingInstruction']['initialTransactionId'];
+							}
+						}
+	
+						update_post_meta($seqOrderID, "payment_initial_id", $InitiatedTransactionID);
 						
 						wp_safe_redirect( $this->order_received_page_url.'/'.$orderNew->get_id().'/?key='.$orderNew->get_order_key() );
 						exit;
@@ -1220,6 +1253,7 @@ function woocommerce_gateway_peach() {
 			$result = '';
 			
 			if(isset($this->recurringid) && $this->recurringid != ''){
+				
 				$url = $this->process_checkout_url."/v1/registrations/".$id."/payments";
 				$data = "entityId=".$this->recurringid.
 							"&merchantTransactionId=" .$order_id.
@@ -1228,7 +1262,29 @@ function woocommerce_gateway_peach() {
 							"&paymentType=DB" .
 							"&standingInstruction.mode=REPEATED" .
 							"&standingInstruction.type=RECURRING" .
-							"&standingInstruction.source=MIT";
+							"&standingInstruction.source=MIT".
+							"&standingInstruction.recurringType=SUBSCRIPTION";
+							
+				$payment_initial_id = get_post_meta( $parent_order_id, 'payment_initial_id', true );
+				$logger_id = array();
+				if ( ! empty( $payment_initial_id ) ) {
+					$logger_id['initial_id'] = $payment_initial_id;
+					$data .= "&standingInstruction.initialTransactionId=".$payment_initial_id;
+				}else{
+					$entityId = $this->secureid;
+					$transactionID = get_post_meta( $parent_order_id, 'payment_order_id', true );
+					
+					$payment_initial_id = $this->getInitialID($this->accesstoken, $entityId, $transactionID);
+					
+					if(!empty($payment_initial_id)){
+						$data .= "&standingInstruction.initialTransactionId=".$payment_initial_id;
+						$logger_id['initial_id'] = $payment_initial_id;
+					}else{
+						$logger_id['initial_id'] = 'Could not retrieve id via Peach API';
+						$logger_id['api-data-sent'] = $data;
+					}
+				}
+				$logger->info( "\n".print_r($logger_id, true)."\n\n", array( 'source' => 'peach-get-payment-initial-id' ) );
 			
 				$ch = curl_init();
 				curl_setopt($ch, CURLOPT_URL, $url);
@@ -1287,6 +1343,51 @@ function woocommerce_gateway_peach() {
 				WC_Subscriptions_Manager::process_subscription_payment_failure_on_order($parent_order);
 			}
 		}
+		
+		function getInitialID($accesstoken, $entityId, $transactionID){
+			$logger = wc_get_logger();
+			$logger_info = array();
+			
+			$url = $this->process_checkout_url.'/v3/query/'.$transactionID.'?entityId='.$entityId;
+
+			$headers = [
+				'Authorization: Bearer '.$accesstoken,
+				'Content-Type: application/x-www-form-urlencoded'
+			];
+			
+			$data = http_build_query([
+				'entityId' => $entityId
+			]);
+			
+			//First Test
+			$ch = curl_init();
+			curl_setopt_array($ch, [
+				CURLOPT_URL => $url,
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_CUSTOMREQUEST => 'GET',
+				CURLOPT_HTTPHEADER => $headers,
+				CURLOPT_POSTFIELDS => $data,
+			]);
+			
+			$responseData = curl_exec($ch);
+			$response = json_decode($responseData);
+			
+			$payment_initial_id = $CardholderInitiatedTransactionID = '';
+			
+			if (!empty($response->records) && is_array($response->records)) {
+				foreach ($response->records as $record) {
+					if(!empty($record->resultDetails->CardholderInitiatedTransactionID)) {
+						$payment_initial_id = $record->resultDetails->CardholderInitiatedTransactionID;
+						break;
+					}else if(!empty($record->standingInstruction->initialTransactionId)){
+						$payment_initial_id = $record->standingInstruction->initialTransactionId;
+						break;
+					}
+				}
+			}
+			
+			return $payment_initial_id;
+		}
 			
 		function receipt_page( $order_id ) {
 			
@@ -1294,18 +1395,6 @@ function woocommerce_gateway_peach() {
 			
 			$logger = wc_get_logger();
 			$logger_info = array();
-			$logger_info['settings'] = $this->logger_info_settings;
-			$logger_info['urls'] = array(
-				'process_checkout' => $this->process_checkout_url,
-				'request_checkout' => $this->request_checkout_url,
-				'request_status' => $this->request_status_url,
-				'request_pre_status' => $this->request_pre_status_url,
-				'request_refund' => $this->request_refund_url,
-				'checkout_page' => $this->checkout_page_url,
-				'order_received_page' => $this->order_received_page_url,
-				'order_pay_page' => $this->order_pay_page_url,
-				'shopperResultUrl' => WC_PEACH_SITE_URL.'?wc-api=WC_Peach_Payments'
-			);
 			
 			$seqOrderID = $order_id;
 
@@ -1444,7 +1533,6 @@ function woocommerce_gateway_peach() {
 			//First Check for Mixed Basked
 			if($subscribe_test[1]){
 				$logger_info['errors'] = array(
-					'Order ID' => $seqOrderID,
 					'Response' => 'Mixed baskets detected.',
 				);
 				$logger->info( "\n".print_r($logger_info, true)."\n\n", array( 'source' => 'peach-receipt-page' ) );
@@ -1492,7 +1580,6 @@ function woocommerce_gateway_peach() {
 						if($this->embed_clientid == '' || $this->embed_clientsecret == '' || $this->embed_merchantid == ''){
 							$embed_errors = true;
 							$logger_info['errors'] = array(
-								'order' => $order_id,
 								'embed_token' => 'error',
 							);
 							$embed_error_txt = 'Invalid System Configuration. Please contact Support.';
@@ -1504,7 +1591,6 @@ function woocommerce_gateway_peach() {
 							}else{
 								$embed_errors = true;
 								$logger_info['errors'] = array(
-									'order' => $order_id,
 									'embed_token' => 'token error',
 								);
 
@@ -1610,6 +1696,7 @@ function woocommerce_gateway_peach() {
 					}
 					
 				}else if($payOption == 'dontsave' || $payOption == 'saveinfo' || $payOption == 'savedcards'){
+
 					//New 3D Secure Rule. Address can't exceed 50 chars
 					$billing_address = substr($order->get_billing_address_1(),0,50);
 					$billing_address = str_replace('&', ' ',$billing_address);
@@ -1704,7 +1791,7 @@ function woocommerce_gateway_peach() {
 					$ch = curl_init();
 					curl_setopt($ch, CURLOPT_URL, $url);
 					curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-								   'Authorization:Bearer '. $this->accesstoken));
+								'Authorization:Bearer '. $this->accesstoken));
 					curl_setopt($ch, CURLOPT_POST, 1);
 					curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
 					curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->ssl_verifypeer);
@@ -1749,7 +1836,7 @@ function woocommerce_gateway_peach() {
 								
 								var expiry = jQuery('.wpwl-control-expiry').val();
 								expiry = expiry.replace(/\s/g, '');
-							  
+							
 								var currentDate = new Date();
 								var inputYear = parseInt(expiry.substr(3, 2), 10) + 2000;
 								var inputMonth = parseInt(expiry.substr(0, 2), 10) - 1;
@@ -1781,16 +1868,16 @@ function woocommerce_gateway_peach() {
 										'font-size': '17px'
 									}
 								},
-								  onBeforeSubmitCard: function(e){
+								onBeforeSubmitCard: function(e){
 									return validateExpiry(e);
-								  }
+								}
 							}
 							function validateExpiry(e){
 								var currentYear = new Date().getFullYear();
 								
 								var expiry = jQuery('.wpwl-control-expiry').val();
 								expiry = expiry.replace(/\s/g, '');
-							  
+							
 								var currentDate = new Date();
 								var inputYear = parseInt(expiry.substr(3, 2), 10) + 2000;
 								var inputMonth = parseInt(expiry.substr(0, 2), 10) - 1;
@@ -1823,7 +1910,7 @@ function woocommerce_gateway_peach() {
 							';
 						}
 						
-						$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL", "FLOAT" );
+						$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL", "FLOAT", "MAUCAS" );
 						$brands_opts = $this->consolidated_label_logos;
 						if($brands_opts && $brands_opts != ''){
 							$brands = array_diff($brands_opts, $brands_exclude);
@@ -1836,7 +1923,6 @@ function woocommerce_gateway_peach() {
 					}else{
 						if(isset($responseData->result->description) && isset($responseData->result->code)){
 							$logger_info['errors'] = array(
-								'Order ID' => $order_id,
 								'Response Code' => $responseCode,
 								'Response' => (array)$responseData,
 							);
@@ -1844,14 +1930,12 @@ function woocommerce_gateway_peach() {
 							$order->add_order_note( 'Peach Error ['.$responseCode.'] - '.$responseData->result->description.'.',0,false);
 						}else if(isset($curlError)){
 							$logger_info['errors'] = array(
-								'Order ID' => $order_id,
 								'Response' => 'Error [Curl] '.$curlError
 							);
 							$order->add_order_note( 'Peach Error [Curl] - '.$curlError,0,false);
 							wc_add_notice(  'Error [Curl] - '.$curlError, 'error' );
 						}else{
 							$logger_info['errors'] = array(
-								'Order ID' => $order_id,
 								'Response' => (array)$responseData,
 							);
 							$order->add_order_note( 'Peach Error [Unknown] - Please contact Peach Payments.',0,false);
@@ -1979,7 +2063,25 @@ function woocommerce_gateway_peach() {
 			curl_close($ch);
 			
 			if(isset($response->result->code)){
-				return array($response->result->code, $seqOrderID, $response->payments[0]->id, $response->payments[0]->paymentBrand);
+				$result = [
+					$response->result->code,
+					$seqOrderID,
+					$response->payments[0]->id,
+					$response->payments[0]->id
+				];
+				
+				$InitiatedTransactionID = '';
+				if (isset($response->resultDetails)) {
+					if (isset($response->resultDetails->CardholderInitiatedTransactionID)) {
+						$result[] = $response->resultDetails->CardholderInitiatedTransactionID;
+					}
+				}else if(isset($response->standingInstruction)){
+					if(isset($response->standingInstruction->initialTransactionId)){
+						$result[] = $response->standingInstruction->initialTransactionId;
+					}
+				}
+				
+				return $result;
 			}else{
 				$logger_info['error'] = array(
 					'Order' => $seqOrderID,
@@ -3532,7 +3634,7 @@ function peach_add_card_content() {
 			</style>
 			';
 			
-			$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL", "FLOAT" );
+			$brands_exclude = array("CAPITECPAY", "EFTSECURE", "MOBICRED", "1VOUCHER", "SCANTOPAY", "APPLE", "MPESA", "PAYFLEX", "ZEROPAY", "INSTANTEFT", "BLINKBYEMTEL", "MCBJUICE", "PAYPAL", "FLOAT", "MAUCAS" );
 			$brands_opts = $peachOptions['consolidated_label_logos'];
 			if($brands_opts && $brands_opts != ''){
 				$brands = array_diff($brands_opts, $brands_exclude);
@@ -3743,6 +3845,9 @@ function generateCards($action, $myCards, $myOldCards, $cardRemove){
 	return $combinedCards;
 }
 
+
+/* Old Function */
+/*
 function peachCardUpdateOrder_funct(){
 	$cardID = $_REQUEST['cardID'];
 	$orderID = $_REQUEST['orderID'];
@@ -3752,9 +3857,72 @@ function peachCardUpdateOrder_funct(){
 	echo $new_reg_id;
 	die();
 }
-add_action('wp_ajax_nopriv_peachCardUpdateOrder', 'peachCardUpdateOrder_funct');
+*/
+/* New Function */
+function peachCardUpdateOrder_funct() {
+
+	check_ajax_referer( 'ajax-nonce', 'ajax_nonce' );
+
+	if ( ! is_user_logged_in() ) {
+		wp_die(
+			esc_html__( 'Unauthorized', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 403 )
+		);
+	}
+
+	$card_id  = isset( $_REQUEST['cardID'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['cardID'] ) ) : '';
+	$order_id = isset( $_REQUEST['orderID'] ) ? absint( $_REQUEST['orderID'] ) : 0;
+
+	if ( ! $card_id || ! $order_id ) {
+		wp_die(
+			esc_html__( 'Invalid request parameters', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 400 )
+		);
+	}
+
+	$order = wc_get_order( $order_id );
+
+	if ( ! $order ) {
+		wp_die(
+			esc_html__( 'Invalid order', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 404 )
+		);
+	}
+
+	// Authorisation: user must own the order or have manage_woocommerce capability.
+	$current_user_id = get_current_user_id();
+	$order_user_id   = (int) $order->get_user_id();
+
+	if ( $order_user_id && $order_user_id !== $current_user_id && ! current_user_can( 'manage_woocommerce' ) ) {
+		wp_die(
+			esc_html__( 'You are not allowed to modify this order', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 403 )
+		);
+	}
+
+	// Guest orders (no user attached) can only be updated by privileged users.
+	if ( ! $order_user_id && ! current_user_can( 'manage_woocommerce' ) ) {
+		wp_die(
+			esc_html__( 'You are not allowed to modify this order', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 403 )
+		);
+	}
+
+	$new_reg_id = update_post_meta( $order_id, 'payment_registration_id', $card_id );
+
+	echo (int) $new_reg_id;
+	wp_die();
+}
+//add_action('wp_ajax_nopriv_peachCardUpdateOrder', 'peachCardUpdateOrder_funct'); Removed for Security
 add_action('wp_ajax_peachCardUpdateOrder', 'peachCardUpdateOrder_funct');
 
+/*Olf Function*/
+/*
 function peachEmbedUpdateOrder_funct(){
 	$status = $_REQUEST['mystatus'];
 	$transactionID = $_REQUEST['transaction'];
@@ -3783,6 +3951,92 @@ function peachEmbedUpdateOrder_funct(){
 	
 	echo $return_url;
 	die();
+}
+*/
+
+/*New Function*/
+function peachEmbedUpdateOrder_funct() {
+
+	check_ajax_referer( 'ajax-nonce', 'ajax_nonce' );
+
+	$status        = isset( $_REQUEST['mystatus'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['mystatus'] ) ) : '';
+	$transactionID = isset( $_REQUEST['transaction'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['transaction'] ) ) : '';
+	$code          = isset( $_REQUEST['mycode'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['mycode'] ) ) : '';
+	// Optional extra protection – front-end can send the order key as well.
+	$order_key     = isset( $_REQUEST['order_key'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['order_key'] ) ) : '';
+
+	$return_url = '';
+
+	if ( '' === $transactionID || '' === $status || '' === $code ) {
+		wp_die(
+			esc_html__( 'Invalid request', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 400 )
+		);
+	}
+
+	$originalid = str_replace( 'Checkout', '', $transactionID );
+	$id         = absint( ltrim( $originalid, '0' ) );
+
+	if ( ! $id ) {
+		wp_die(
+			esc_html__( 'Invalid transaction reference', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 400 )
+		);
+	}
+
+	$order = wc_get_order( $id );
+
+	if ( ! $order ) {
+		wp_die(
+			esc_html__( 'Order not found', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 404 )
+		);
+	}
+
+	// If an order key is supplied, it must match this order.
+	if ( $order_key && $order_key !== $order->get_order_key() ) {
+		wp_die(
+			esc_html__( 'Order verification failed', 'woocommerce-gateway-peach-payments' ),
+			'',
+			array( 'response' => 403 )
+		);
+	}
+
+	// If the order is attached to a user and the requester is logged in,
+	// enforce ownership or manage_woocommerce capability.
+	$order_user_id = (int) $order->get_user_id();
+	if ( is_user_logged_in() && $order_user_id ) {
+		$current_user_id = get_current_user_id();
+		if ( $current_user_id !== $order_user_id && ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die(
+				esc_html__( 'You are not allowed to modify this order', 'woocommerce-gateway-peach-payments' ),
+				'',
+				array( 'response' => 403 )
+			);
+		}
+	}
+
+	// Only accept known status/code combinations.
+	if ( 'complete' === $status && '000.100.110' === $code ) {
+		$order->add_order_note( 'Peach Embedded Payment Successfull.', 0, false );
+		$order->update_status( 'processing', __( 'Order being processed.', 'woocommerce' ) );
+		add_post_meta( $id, 'peach_api_trigger', 'process_embedded' );
+		$return_url = $order->get_checkout_order_received_url();
+	} elseif ( 'cancelled' === $status ) {
+		$order->add_order_note( 'Peach Embedded Payment Cancelled.', 0, false );
+		$return_url = $order->get_cancel_order_url_raw();
+	} else {
+		$order->add_order_note( 'Peach Embedded Payment Expired.', 0, false );
+		$return_url = $order->get_cancel_order_url_raw();
+	}
+
+	$order->save();
+
+	echo esc_url_raw( $return_url );
+	wp_die();
 }
 add_action('wp_ajax_nopriv_peachEmbedUpdateOrder', 'peachEmbedUpdateOrder_funct');
 add_action('wp_ajax_peachEmbedUpdateOrder', 'peachEmbedUpdateOrder_funct');

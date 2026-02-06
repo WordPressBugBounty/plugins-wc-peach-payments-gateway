@@ -1,5 +1,11 @@
 *** Peach Payments Gateway Changelog ***
 
+2025.11.19 - Version 3.3.7
+ * Enhancement - Added MauCas as a new payment method to Consolidated Payments.
+ * Enhancement - Showing first 6 payement logos now instead of 4.
+ * Enhancement - Add Card on File parameters for existing subscriptions
+ * Fix - Vulnerability checks for Ajax calls.
+
 2025.05.22 - version 3.3.6
  * Fix - Retry of Subscription payments on initial fail result.
 

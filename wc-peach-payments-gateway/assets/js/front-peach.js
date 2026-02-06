@@ -30,7 +30,8 @@ jQuery( document ).ready(function($) {
 			data:{ 
 			  action: 'peachCardUpdateOrder',
 			  cardID: card_id,
-			  orderID: order_id
+			  orderID: order_id,
+			  ajax_nonce: peach_ajax_object.ajax_nonce
 			},
 			success:function(data){
 				if(data === '1'){
@@ -111,7 +112,8 @@ function process_embed(status, transactionid, code){
 		  action: 'peachEmbedUpdateOrder',
 		  mystatus: status,
 		  transaction: transactionid,
-		  mycode: code
+		  mycode: code,
+		  ajax_nonce: peach_ajax_object.ajax_nonce
 		},
 		success:function(data){
 			return data;
