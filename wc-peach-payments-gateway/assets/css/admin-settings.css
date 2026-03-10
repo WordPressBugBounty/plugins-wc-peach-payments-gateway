@@ -1,0 +1,49 @@
+p.submit{
+    display: block;
+    background: transparent;
+    padding: 20px 30px 20px;
+    background: #f0f0f1;
+    margin-top: 0;
+}
+
+.peach-payments-admin-wrapper h2{margin:0 0 30px 0 !important}
+
+.peach-admin-grid {
+	display: grid;
+	grid-template-columns: 2fr 1fr;
+	gap: 30px;
+}
+
+.peach-admin-grid a{color:#EC5228 !important}
+
+.peach-admin-column {
+	background: #fff;
+	padding: 20px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+}
+
+/*
+.peach-admin-column.peach-admin-sidebar{
+	position: fixed;
+    right: 30px;
+    min-width: 26.33%;
+}
+*/
+
+.peach-admin-sidebar h3 {
+	margin-top: 0;
+}
+
+.woocommerce_page_wc-settings .peach-admin-grid h3.wc-settings-sub-title {
+    border-bottom: 1px dotted #ccc;
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+    color: #EC5228;
+}
+
+.peach-admin-column.peach-admin-settings #woocommerce_peach-payments_section_general_title + table tbody tr:nth-child(4),
+.peach-admin-column.peach-admin-settings #woocommerce_peach-payments_section_general_title + table tbody tr:nth-child(5),
+.peach-admin-column.peach-admin-settings #woocommerce_peach-payments_section_general_title + table tbody tr:nth-child(6),
+.peach-admin-column.peach-admin-settings #woocommerce_peach-payments_section_general_title + table tbody tr:nth-child(8)
+{display:none !important;}

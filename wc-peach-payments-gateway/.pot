@@ -1,0 +1,192 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: WooCommerce Peach Payments Gateway 4.0\n"
+"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/wc-peach-payments-gateway\n"
+"POT-Creation-Date: 2025-07-08\n"
+"PO-Revision-Date: 2025-07-08\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: ChatGPT\n"
+"X-Domain: woocommerce-gateway-peach-payments\n"
+
+#: woocommerce_gateway_peach_payments.php:25
+msgid "WooCommerce must be installed and active to use the Peach Payments Gateway."
+msgstr ""
+
+#: includes/class-init.php:66
+msgid "My Cards"
+msgstr ""
+
+#: includes/class-init.php:70
+msgid "View and manage your saved Peach Payments cards."
+msgstr ""
+
+#: includes/class-init.php:91
+msgid "Settings"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:11
+msgid "Enable/Disable"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:12
+msgid "Enable Peach Payments Gateway"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:16
+msgid "Title"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:18
+msgid "This controls the title which the user sees during checkout."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:23
+msgid "Description"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:25
+msgid "This controls the description which the user sees during checkout."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:33
+msgid "Payment Methods"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:35
+msgid "This option were disabled in version 3.1.8 of this plugin."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:56
+msgid "Checkout Options"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:58
+msgid "Which payment options should display on the front-end? Hold down \"CTRL\" key to select multiples."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:70
+msgid "Consolidated Payments Label"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:73
+msgid "Front-end display label for consolidated payments."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:78
+msgid "Consolidated Payments Logos"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:80
+msgid "Which logos should display on front-end for consolidated payments option."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:99
+msgid "Enable Embedded Checkout"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:100
+msgid "Only supports certain payment methods."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:103
+msgid "Embedded Checkout enables the Peach Payments hosted payments page to load within your website without any redirects."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:108
+msgid "Client ID"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:111
+msgid "Client Secret"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:114
+msgid "Merchant ID"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:120
+msgid "Card Storage"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:121
+msgid "Enable Card Storage"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:124
+msgid "Allow customers to store cards against their account."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:129
+msgid "Order IDs"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:130
+msgid "Always use WooCommerce order IDs"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:133
+msgid "Overwrite any custom generated order IDs by third party plugins e.g. sequentional order IDs."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:138
+msgid "Auto Complete"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:139
+msgid "Enable Auto Complete for Virtual/Downloadable products."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:142
+msgid "Allow Peach Payments to update order status for successfull payments of Virtual/Downloadable products to \"Completed\"."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:146
+msgid "Transaction Mode"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:149
+msgid "Set your gateway to LIVE when you are ready."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:155
+msgid "Order Status"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:158
+msgid "Choose what the order successfull status should be."
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:162
+msgid "Access Token"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:165
+msgid "Secret Token"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:168
+msgid "3DSecure Entity ID"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:171
+msgid "Recurring Entity ID"
+msgstr ""
+
+#: includes/gateways/form-fields-peach-hosted.php:174
+msgid "Card Webhook Decryption key"
+msgstr ""
+
+#: includes/class-token-ajax-handler.php:64
+msgid "Card could not be deleted because it is linked to an active subscription. Please contact the site administrator."
+msgstr ""
+
+#: includes/class-token-ajax-handler.php:70
+msgid "Card deleted successfully."
+msgstr ""
+
+#: includes/class-token-ajax-handler.php:72
+msgid "Unable to delete card. Please try again."
+msgstr ""

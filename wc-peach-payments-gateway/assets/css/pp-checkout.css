@@ -1,0 +1,32 @@
+.woocommerce-checkout .payment_method_peach-payments img {
+	max-width: 50px;
+	height: auto;
+}
+
+.peach-redirect-message {
+	font-style: italic;
+	margin-top: 10px;
+	color: #555;
+}
+
+.peach-logos {
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+    width: 100%;
+	flex-wrap:wrap;
+}
+
+.peach-logos img{
+    margin:0 !important;
+}
+
+@media all and (max-width: 767px) {
+	.peach-logos {
+	  display: grid;
+	  grid-template-columns: repeat(4, 1fr); /* 4 equal columns */
+	  gap: 10px; /* adjust spacing as needed */
+	  padding: 10px;
+	}
+}
+

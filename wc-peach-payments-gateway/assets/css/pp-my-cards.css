@@ -1,0 +1,129 @@
+.pp-my-cards-container {
+	padding: 0 0 30px 0;
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 20px;
+}
+
+.pp-my-card {
+	border: 1px solid #e1e1e1;
+	border-radius: 6px;
+	padding: 20px;
+	background-color: #fff;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+	transition: box-shadow 0.2s ease;
+	position:relative;
+}
+
+.pp-my-card:hover {
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.pp-card-header {
+	font-weight: bold;
+	font-size: 16px;
+	margin-bottom: 10px;
+	color: #333;
+}
+
+.pp-card-meta {
+	font-size: 14px;
+	color: #555;
+	margin-bottom: 15px;
+	line-height: 1.4;
+}
+
+.pp-card-meta div {
+	margin-bottom: 4px;
+}
+
+.pp-card-actions {
+	text-align: right;
+	position: absolute;
+    top: 20px;
+    right: 20px;
+}
+
+.pp-delete-card-button {
+	background-color: #EC5228;
+	color: #fff;
+	border: none;
+	border-radius: 4px;
+	padding: 8px 14px;
+	font-size: 14px;
+	cursor: pointer;
+	transition: background-color 0.3s ease;
+}
+
+.pp-delete-card-button:hover {
+	background-color: #d04923; /* Darkened version of #EC5228 for hover */
+}
+
+.pp-add-card-button-wrap {
+  margin-bottom: 20px;
+  text-align: right;
+}
+
+#pp-add-card-button {
+  background-color: #EC5228;
+  color: #fff;
+  border: none;
+  padding: 10px 20px;
+  font-weight: bold;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+#pp-add-card-button:hover {
+  background-color: #cf3c13;
+}
+
+#pp-add-card-form-wrapper {
+  background: #f9f9f9;
+  padding: 20px;
+  margin-top: 20px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+#pp-add-card-form h3 {
+  margin-top: 0;
+}
+
+.pp-add-card-input {
+  margin-bottom: 15px;
+}
+
+.pp-add-card-input label {
+  display: block;
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+.pp-add-card-input input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.pp-add-card-actions {
+  margin-top: 20px;
+  display: flex;
+  gap: 10px;
+}
+
+@media (max-width: 768px) {
+	.pp-my-cards-container {
+		grid-template-columns: 1fr;
+	}
+	
+	.pp-card-actions {
+		position: initial;
+		text-align: left;
+	}
+	
+	.pp-add-card-button-wrap {
+		text-align: left;
+	}
+}
