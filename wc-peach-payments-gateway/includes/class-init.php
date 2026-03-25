@@ -163,7 +163,7 @@ class WC_Peach_Gateway_Init {
 				
 				$my_cards = wc_get_account_endpoint_url( 'my-cards' );
 				nocache_headers();
-    			wp_redirect( $my_cards, 303 ); // force POST→GET
+				wp_safe_redirect( $my_cards, 303 ); // force POST→GET
 				exit;
 			}else{
 				return;
@@ -173,21 +173,30 @@ class WC_Peach_Gateway_Init {
 
 
 
-		// Initialize account endpoint for "My Cards"
-		$my_cards_endpoint = new PP_Gateway_My_Cards_Endpoint();
-		$endpoint_slug     = 'my-cards';
-		
-		if (
-			! has_action( 'woocommerce_account_' . $endpoint_slug . '_endpoint', [ PP_Gateway_My_Cards_Endpoint::class, 'endpoint_content' ] )
-		) {
-			$my_cards_endpoint->register();
-			flush_rewrite_rules();
-		}
-
-		// Initialize account endpoint for "Change Card" (hidden) for subscriptions
+		// Initialize account endpoints.
+		PP_Gateway_My_Cards_Endpoint::register();
 		PP_Gateway_Change_Card_Endpoint::register();
 
+		// Flush rewrite rules once after activation/update, after this plugin's endpoints
+		// have been registered on the current request.
+		add_action( 'init', [ __CLASS__, 'maybe_flush_rewrite_rules' ], 99 );
 
+
+	}
+	
+	/**
+	 * Flush rewrite rules once after activation/update, after plugin endpoints are registered.
+	 */
+	public static function maybe_flush_rewrite_rules() {
+		if ( 'yes' !== get_option( 'wc_peach_gateway_needs_rewrite_flush' ) ) {
+			return;
+		}
+	
+		delete_option( 'wc_peach_gateway_needs_rewrite_flush' );
+		delete_option( 'pp_cards_endpoint_flushed' );
+		delete_option( 'peach_change_card_endpoint_flushed' );
+	
+		flush_rewrite_rules();
 	}
 
 	/**

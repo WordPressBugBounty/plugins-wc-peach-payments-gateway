@@ -101,7 +101,7 @@ class PP_Gateway_Token_Add_Handler {
 		// Generate access token
 		$token_response = WC_Gateway_Peach_Hosted::generate_access_token();
 		if ( empty( $token_response['access_token'] ) ) {
-			PP_Peach_API::log_error( 'Token Response', '', 'Missing or not generated for request to add card.', '' );
+			PP_Peach_API::log_error( 'Token Response', $token_response['body'], $token_response['raw'], $token_response['url'] );
 			wc_add_notice( __( 'Unable to connect to Peach Payments. Please try again.', 'woocommerce-gateway-peach-payments' ), 'error' );
 			wp_send_json_error( [ 'message' => 'Error in generating Token for request to add card.', 'response' => $body ], 400 );
 		}
@@ -232,6 +232,7 @@ class PP_Gateway_Token_Add_Handler {
 		//PP_Gateway_Logger::info( "Add Card Checkout Session. ".print_r($response, true) );
 		
 		if ( empty( $response['redirectUrl'] ) ) {
+			PP_Peach_API::log_error( 'Redirect URL', $payload, $response, '' );
 			wp_send_json_error( [ 'message' => 'Registration ID not received.', 'response' => $body ], 400 );
 		}else{
 			wp_send_json_success( [ 'redirectUrl' => $response['redirectUrl'], "mode" => $transaction_mode ] );
@@ -239,7 +240,7 @@ class PP_Gateway_Token_Add_Handler {
 	}
 	
 	public static function maybe_handle_resource_path() {
-		if ( ! is_user_logged_in() || empty( $_GET['resourcePath'] ) ) {
+		if ( ! is_user_logged_in() || empty( $_GET['resourcePath'] ) || empty( $_GET['pp_add_card_return'] ) ) {
 			return;
 		}
 	
@@ -250,7 +251,7 @@ class PP_Gateway_Token_Add_Handler {
 	
 		if ( is_wp_error( $response ) ) {
 			wc_add_notice( __( 'Failed to retrieve card registration.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
 			exit;
 		}
 	
@@ -287,7 +288,7 @@ class PP_Gateway_Token_Add_Handler {
 			wc_add_notice( __( 'Card registration failed.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 		}
 	
-		wp_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+		wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
 		exit;
 	}
 

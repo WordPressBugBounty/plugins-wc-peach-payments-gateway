@@ -1,5 +1,9 @@
 *** Peach Payments Gateway Changelog ***
 
+2026.03.25 - Version 4.0.1
+  * Enhancement - Improve error logging details
+  * Fix - 404 pages relating to url purging
+
 2026.03.10 - Version 4.0.0
   * Enhancement - Simplified Integration with Checkout V2 Hosted payment page
   * Enhancement - Customizable Storefront Branding

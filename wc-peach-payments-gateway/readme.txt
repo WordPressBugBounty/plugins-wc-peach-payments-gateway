@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 4.0.0
-Version: 4.0.0
+Stable tag: 4.0.1
+Version: 4.0.1
 License: GPLv3
 
 
@@ -44,6 +44,10 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 4.0.1 =
+  * Enhancement - Improve error logging details
+  * Fix - 404 pages relating to url purging
 
 = 4.0.0 =
   * Enhancement - Simplified Integration with Checkout V2 Hosted payment page

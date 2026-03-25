@@ -646,7 +646,7 @@ public static function create_checkout( WC_Order $order ) {
 		// Generate access token
 		$token_response = WC_Gateway_Peach_Hosted::generate_access_token();
 		if ( empty( $token_response['access_token'] ) ) {
-			PP_Peach_API::log_error( 'Token Response', '', 'Missing or not generated for order ['.$order_id.']', '' );
+			self::log_error( 'Token Response ['.$order_id.']', $token_response['body'], $token_response['raw'], $token_response['url'] );
 			wc_add_notice( __( 'Unable to connect to Peach Payments. Please try again.', 'woocommerce-gateway-peach-payments' ), 'error' );
 			return [ 'result' => 'failure' ];
 		}
@@ -750,6 +750,7 @@ public static function create_checkout( WC_Order $order ) {
 		$response = WC_Gateway_Peach_Hosted::create_checkout_session( $access_token, $payload );
 	
 		if ( empty( $response['redirectUrl'] ) ) {
+			self::log_error( 'Redirect URL ['.$order_id.']', $payload, $response, '' );
 			$order->add_order_note( 'Peach API error: No redirect URL returned.' );
 			wc_add_notice( __( 'Peach Payments error. Please try again or use a different payment method.', 'woocommerce-gateway-peach-payments' ), 'error' );
 			return [ 'result' => 'failure' ];

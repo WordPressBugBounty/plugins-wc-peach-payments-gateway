@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/" target="_blank" rel="noopener noreferrer">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 4.0
+ * Version: 4.0.1
  * Requires at least: 6.8
  * Tested up to: 6.8
  * Text Domain: woocommerce-gateway-peach-payments
@@ -41,14 +41,42 @@ define( 'WC_PEACH_GATEWAY_PLUGIN_FILE', __FILE__ );
 define( 'WC_PEACH_GATEWAY_PATH', plugin_dir_path( __FILE__ ) );
 define( 'WC_PEACH_GATEWAY_URL', plugin_dir_url( __FILE__ ) );
 define( 'WC_PEACH_TEXT_DOMAIN', 'woocommerce-gateway-peach-payments' );
+define( 'WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION', '2' );
 
 define( 'PEACH_FILE', 'wc-peach-payments-gateway/woocommerce-gateway-peach-payments.php' );
 
 // Load logger
 require_once WC_PEACH_GATEWAY_PATH . 'includes/class-logger.php';
 
+register_activation_hook( __FILE__, 'wc_peach_payments_activate' );
+register_deactivation_hook( __FILE__, 'wc_peach_payments_deactivate' );
+
 // Load after WooCommerce
 add_action( 'plugins_loaded', 'wc_peach_payments_init', 11 );
+add_action( 'plugins_loaded', 'wc_peach_payments_maybe_schedule_rewrite_flush', 12 );
+
+function wc_peach_payments_activate() {
+	update_option( 'wc_peach_gateway_needs_rewrite_flush', 'yes' );
+	update_option( 'wc_peach_gateway_rewrite_schema_version', WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION );
+}
+
+function wc_peach_payments_deactivate() {
+	delete_option( 'wc_peach_gateway_needs_rewrite_flush' );
+	delete_option( 'pp_cards_endpoint_flushed' );
+	delete_option( 'peach_change_card_endpoint_flushed' );
+	flush_rewrite_rules();
+}
+
+function wc_peach_payments_maybe_schedule_rewrite_flush() {
+	$stored_schema_version = (string) get_option( 'wc_peach_gateway_rewrite_schema_version', '' );
+
+	if ( $stored_schema_version !== WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION ) {
+		update_option( 'wc_peach_gateway_needs_rewrite_flush', 'yes' );
+		update_option( 'wc_peach_gateway_rewrite_schema_version', WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION );
+		delete_option( 'pp_cards_endpoint_flushed' );
+		delete_option( 'peach_change_card_endpoint_flushed' );
+	}
+}
 
 /*
 * We are not supporting the following plugins anymore
@@ -57,17 +85,32 @@ add_action( 'plugins_loaded', 'wc_peach_payments_init', 11 );
 */
 
 function wc_peach_payments_init() {
-	//CleanTalk Plugin Compatibility
-	if(null !== get_option('cleantalk_settings')){
-		$cleanTalk = get_option('cleantalk_settings');
-		
-		if(isset($cleanTalk['exclusions__urls'])){
-			$cleanTalk['exclusions__urls'] = '(\/order-pay\/)';
+	// CleanTalk compatibility: append the order-pay regex once instead of overwriting exclusions on every request.
+	if ( null !== get_option( 'cleantalk_settings' ) ) {
+		$cleanTalk = get_option( 'cleantalk_settings' );
+
+		if ( is_array( $cleanTalk ) ) {
+			$order_pay_pattern = '(\/order-pay\/)';
+			$current_exclusions = isset( $cleanTalk['exclusions__urls'] ) ? (string) $cleanTalk['exclusions__urls'] : '';
+			$needs_update = false;
+
+			if ( strpos( $current_exclusions, $order_pay_pattern ) === false ) {
+				$current_exclusions = trim( $current_exclusions );
+				$cleanTalk['exclusions__urls'] = $current_exclusions !== ''
+					? $current_exclusions . "\n" . $order_pay_pattern
+					: $order_pay_pattern;
+				$needs_update = true;
+			}
+
+			if ( empty( $cleanTalk['exclusions__urls__use_regexp'] ) ) {
+				$cleanTalk['exclusions__urls__use_regexp'] = 1;
+				$needs_update = true;
+			}
+
+			if ( $needs_update ) {
+				update_option( 'cleantalk_settings', $cleanTalk );
+			}
 		}
-		if(isset($cleanTalk['exclusions__urls__use_regexp'])){
-			$cleanTalk['exclusions__urls__use_regexp'] = 1;
-		}
-		update_option('cleantalk_settings', $cleanTalk);
 	}
 	
 	if ( ! class_exists( 'WooCommerce' ) ) {

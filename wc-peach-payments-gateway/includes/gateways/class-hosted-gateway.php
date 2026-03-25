@@ -387,7 +387,9 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		
 		return [
 			'access_token' => $data['access_token'] ?? '',
-			'raw' => $data
+			'raw' => $data,
+			'url' => $url,
+			'body' => json_decode( $body, true )
 		];
 	}
 	

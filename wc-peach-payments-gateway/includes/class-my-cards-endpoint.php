@@ -18,7 +18,6 @@ class PP_Gateway_My_Cards_Endpoint {
 		add_filter( 'query_vars', [ __CLASS__, 'add_query_vars' ] );
 		add_filter( 'woocommerce_account_menu_items', [ __CLASS__, 'add_menu_item' ] );
 		add_action( 'woocommerce_account_' . self::$endpoint . '_endpoint', [ __CLASS__, 'endpoint_content' ] );
-		add_action( 'init', [ __CLASS__, 'maybe_flush_rewrite_rules' ] );
 	}
 
 	/**
@@ -95,23 +94,5 @@ class PP_Gateway_My_Cards_Endpoint {
 		if ( file_exists( $template ) ) {
 			include $template;
 		}
-	}
-
-	/**
-	 * Flush rewrite rules if endpoint isn't working yet.
-	 */
-	public static function maybe_flush_rewrite_rules() {
-		if ( get_option( 'pp_cards_endpoint_flushed' ) ) {
-			return;
-		}
-
-		$test_url = home_url( '/my-account/' . self::$endpoint . '/' );
-		$response = wp_remote_get( $test_url );
-
-		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
-			flush_rewrite_rules();
-		}
-
-		update_option( 'pp_cards_endpoint_flushed', true );
 	}
 }

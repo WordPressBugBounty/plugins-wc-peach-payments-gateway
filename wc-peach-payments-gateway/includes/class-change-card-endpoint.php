@@ -20,11 +20,10 @@ class PP_Gateway_Change_Card_Endpoint {
 		add_action( 'init', [ __CLASS__, 'add_endpoint' ] );
 		add_filter( 'query_vars', [ __CLASS__, 'add_query_vars' ] );
 		add_action( 'woocommerce_account_' . self::$endpoint . '_endpoint', [ __CLASS__, 'endpoint_content' ] );
-		add_action( 'init', [ __CLASS__, 'maybe_flush_rewrite_rules' ] );
 
 		// Add "Change Card" action button on subscription view.
 		add_filter( 'wcs_view_subscription_actions', [ __CLASS__, 'add_change_card_action' ], 10, 2 );
-	 }
+	}
 
 	/**
 	 * Add custom endpoint.
@@ -381,23 +380,5 @@ class PP_Gateway_Change_Card_Endpoint {
 			PP_Gateway_Logger::error( 'Change Card: exception updating subscription #' . $subscription_id . ' — ' . $e->getMessage() );
 			wc_add_notice( __( 'Could not update subscription card. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 		}
-	}
-
-	/**
-	 * Flush rewrite rules if endpoint isn't working yet.
-	 */
-	public static function maybe_flush_rewrite_rules() {
-		if ( get_option( 'peach_change_card_endpoint_flushed' ) ) {
-			return;
-		}
-
-		$test_url = home_url( '/my-account/' . self::$endpoint . '/' );
-		$response = wp_remote_get( $test_url );
-
-		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
-			flush_rewrite_rules();
-		}
-
-		update_option( 'peach_change_card_endpoint_flushed', true );
 	}
 }
