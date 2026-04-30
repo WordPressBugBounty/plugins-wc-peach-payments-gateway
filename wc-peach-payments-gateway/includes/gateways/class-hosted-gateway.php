@@ -7,26 +7,38 @@ defined( 'ABSPATH' ) || exit;
 
 class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	
-	// Declare all formerly dynamic properties
+	// Declare all gateway settings properties explicitly for PHP 8.2+ compatibility.
+	// These are populated from $this->form_fields / saved gateway settings in __construct().
+	public $enabled;
+	public $section_general_title;
+	public $title;
+	public $description;
+	public $redirect_notice;
 	public $checkout_methods;
 	public $checkout_methods_select;
 	public $consolidated_label;
 	public $consolidated_label_logos;
 	public $embed_payments;
+	public $section_api_title;
 	public $embed_clientid;
 	public $embed_clientsecret;
 	public $embed_merchantid;
+	public $access_token;
+	public $channel_3ds;
+	public $secret;
+	public $section_req_title;
+	public $channel;
+	public $section_webhooks_title;
+	public $card_webhook_key;
+	public $section_cart_title;
 	public $card_storage;
+	public $section_wc_title;
+	public $peach_order_status;
 	public $orderids;
 	public $auto_complete;
+	public $card_only;
 	public $order_status;
 	public $transaction_mode;
-	public $peach_order_status;
-	public $access_token;
-	public $secret;
-	public $channel_3ds;
-	public $channel;
-	public $card_webhook_key;
 
 	/**
 	 * Order statuses for form field dropdown.
@@ -43,7 +55,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		$this->method_title       = __( 'Peach Payments', 'woocommerce-gateway-peach-payments' );
 		$this->method_description = __( 'Secure hosted checkout and tokenised card payments via Peach Payments.', 'woocommerce-gateway-peach-payments' );
 		$this->has_fields         = false;
-		$this->supports           = [ 'products', 'refunds', 'subscriptions', 'subscription_cancellation', 'subscription_reactivation', 'subscription_suspension', 'subscription_amount_changes', 'subscription_date_changes', 'subscription_payment_method_change', 'multiple_subscriptions', 'manual_subscriptions', 'subscription_payment_method_change_admin' ];
+		$this->supports           = [ 'products', 'refunds', 'subscriptions', 'subscription_cancellation', 'subscription_reactivation', 'subscription_suspension', 'subscription_amount_changes', 'subscription_date_changes', 'subscription_payment_method_change', 'subscription_payment_method_change_customer', 'multiple_subscriptions', 'manual_subscriptions', 'subscription_payment_method_change_admin', 'gateway_scheduled_payments' ];
 
 		$this->icon = WC_PEACH_GATEWAY_URL . 'assets/images/Peach_Payments_Primary_logo.png';
 
@@ -297,14 +309,12 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	
 		// Save payment_order_id if not already saved
 		if ( $peach_order_id && ! metadata_exists( 'post', $order_id, 'payment_order_id' ) ) {
-			//update_post_meta( $order_id, 'payment_order_id', sanitize_text_field( $peach_order_id ) );
 			$order->update_meta_data( 'payment_order_id', sanitize_text_field( $peach_order_id ) );
 			PP_Gateway_Logger::debug( "[Hosted] Stored payment_order_id: $peach_order_id for Order $order_id" );
 		}
 	
 		// Save registrationId if not already saved
 		if ( $registration_id && ! metadata_exists( 'post', $order_id, 'payment_registration_id' ) ) {
-			//update_post_meta( $order_id, 'payment_registration_id', sanitize_text_field( $registration_id ) );
 			$order->update_meta_data( 'payment_registration_id', sanitize_text_field( $registration_id ) );
 			PP_Gateway_Logger::debug( "[Hosted] Stored payment_registration_id: $registration_id for Order $order_id" );
 		}
@@ -312,11 +322,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		$order->save();
 	
 		if ( str_starts_with( $code, '000.000.' ) || str_starts_with( $code, '000.100.1' ) ) {
-			// Successful payment
-			if ( $order->get_status() === 'pending' || $order->get_status() === 'failed' ) {
-				$order->payment_complete( $peach_order_id );
-				$order->add_order_note( __( 'Payment completed via Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
-			}
+			PP_Gateway_Order_Utils::handle_payment_status( $order, $result );
 			wp_safe_redirect( $this->get_return_url( $order ) );
 			exit;
 	
@@ -414,21 +420,32 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	}
 	
 	public function handle_return_from_peach() {
-		
-		//echo '<pre>'.print_r($_POST, true).'</pre>'; die();
-		
-		if ( ! isset( $_POST, $_GET['order_id'] ) ) {
+		if ( ! isset( $_GET['order_id'] ) ) {
 			wp_die( 'Missing parameters.' );
 		}
 	
-		$order_id  = absint( $_GET['order_id'] );
-		$order     = wc_get_order( $order_id );
+		$order_id = absint( $_GET['order_id'] );
+		$order    = wc_get_order( $order_id );
 	
 		if ( ! $order ) {
 			wp_die( 'Order not found.' );
 		}
 	
-		PP_Gateway_Order_Utils::handle_payment_status( $order, $_POST );
+		$response = ( ! empty( $_POST ) && is_array( $_POST ) ) ? $_POST : [];
+	
+		if ( empty( $response ) ) {
+			PP_Gateway_Logger::warning( 'Peach return hit without POST payload for order #' . $order_id . '. Order left unchanged.' );
+			wp_safe_redirect( $this->get_return_url( $order ) );
+			exit;
+		}
+	
+		if ( ! isset( $response['result_code'] ) && ! isset( $response['result']['code'] ) ) {
+			PP_Gateway_Logger::warning( 'Peach return hit without result code for order #' . $order_id . '. Order left unchanged. Response: ' . print_r( $response, true ) );
+			wp_safe_redirect( $this->get_return_url( $order ) );
+			exit;
+		}
+	
+		PP_Gateway_Order_Utils::handle_payment_status( $order, $response );
 	
 		// Redirect to order received page
 		wp_safe_redirect( $this->get_return_url( $order ) );

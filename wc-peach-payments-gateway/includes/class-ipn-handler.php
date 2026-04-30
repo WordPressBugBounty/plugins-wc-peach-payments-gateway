@@ -75,6 +75,10 @@ class PP_Gateway_IPN_Handler {
 		$order->update_meta_data( 'peach_ipn_handled', true );
 		$order->save();
 
+		if ( class_exists( 'PP_Gateway_Subscription_Handler' ) && in_array( $status, [ 'PAID', 'SUCCESS', 'COMPLETED' ], true ) ) {
+			PP_Gateway_Subscription_Handler::sync_payment_meta_from_order_to_subscriptions( $order, 'ipn_success' );
+		}
+
 		status_header( 200 );
 		echo 'OK';
 		exit;

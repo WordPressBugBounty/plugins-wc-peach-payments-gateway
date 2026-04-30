@@ -52,6 +52,7 @@ class WC_Peach_Gateway_Init {
 		
 		// Recurring Subscriptions renderer
 		require_once WC_PEACH_GATEWAY_PATH . 'includes/class-subscription-handler.php';
+		PP_Gateway_Subscription_Handler::register();
 		
 		// Webhook Handler
 		require_once WC_PEACH_GATEWAY_PATH . 'includes/class-webhook-handler.php';

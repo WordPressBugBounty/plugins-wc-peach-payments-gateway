@@ -205,12 +205,7 @@ class PP_Gateway_Webhook_Handler {
 			return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' received webhook code 100.396.104', 'log_txt' => 'Stop processing of Webhook Handler'];
 		}
 
-		// Prevent duplicate processing
-		if ( $order->get_meta( 'peach_webhook_handled' ) ) {
-			return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already handled', 'log_txt' => 'Already handled'];
-		}
-
-		// Save metadata
+		// Save metadata early so later duplicate requests still have the IDs available.
 		if ( ! empty( $payment_order_id ) ) {
 			$order->update_meta_data( 'payment_order_id', $payment_order_id );
 		}
@@ -219,20 +214,52 @@ class PP_Gateway_Webhook_Handler {
 		}
 		
 		if(PP_Gateway_Order_Utils::is_successful_result_code($result_code)){
-			$settings      = get_option( 'woocommerce_peach-payments_settings', [] );
-			$custom_status = isset( $settings['peach_order_status'] ) ? $settings['peach_order_status'] : 'processing';
-
-			// Complete order (if not already marked)
-			if ( PP_Gateway_Order_Utils::order_status_checks($order)) {
-				if($payment_order_id){
-					$order->payment_complete( $payment_order_id );
-				}
-				$order->update_status( $custom_status, __( 'Payment completed via Peach Payments Webhook.', WC_PEACH_TEXT_DOMAIN ) );
-				$order->add_order_note( 'Peach Payment Successfull. Webhook.',0,false);
+			if ( $order->get_meta( 'peach_webhook_handled' ) || PP_Gateway_Order_Utils::initial_payment_already_processed( $order, $payment_order_id ) ) {
+				$order->save();
+				return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already handled', 'log_txt' => 'Already handled'];
 			}
-			
-			$order->update_meta_data( 'peach_webhook_handled', true );
-			$order->save();
+
+			$lock_acquired = PP_Gateway_Order_Utils::acquire_initial_payment_lock( $order );
+			if ( ! $lock_acquired ) {
+				return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already being processed', 'log_txt' => 'Already handled'];
+			}
+
+			try {
+				if ( $order->get_meta( 'peach_webhook_handled' ) || PP_Gateway_Order_Utils::initial_payment_already_processed( $order, $payment_order_id ) ) {
+					$order->save();
+					return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already handled after lock', 'log_txt' => 'Already handled'];
+				}
+
+				$settings      = get_option( 'woocommerce_peach-payments_settings', [] );
+				$custom_status = isset( $settings['peach_order_status'] ) ? $settings['peach_order_status'] : 'processing';
+
+				// Complete order (if not already marked)
+				if ( PP_Gateway_Order_Utils::order_status_checks($order)) {
+					if($payment_order_id){
+						$order->payment_complete( $payment_order_id );
+					}
+					$order->update_status( $custom_status, __( 'Payment completed via Peach Payments Webhook.', WC_PEACH_TEXT_DOMAIN ) );
+
+					if ( class_exists( 'PP_Gateway_Subscription_Handler' ) && method_exists( 'PP_Gateway_Subscription_Handler', 'add_unique_order_note' ) ) {
+						PP_Gateway_Subscription_Handler::add_unique_order_note( $order, 'Peach Payment Successfull. Webhook.' );
+					} else {
+						$order->add_order_note( 'Peach Payment Successfull. Webhook.',0,false);
+					}
+
+					PP_Gateway_Order_Utils::mark_initial_payment_processed( $order, $payment_order_id, 'webhook' );
+				}
+				
+				$order->update_meta_data( 'peach_webhook_handled', true );
+				$order->save();
+
+			} finally {
+				PP_Gateway_Order_Utils::release_initial_payment_lock( $order );
+			}
+
+			if ( class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+				PP_Gateway_Subscription_Handler::sync_payment_meta_from_order_to_subscriptions( $order, 'webhook_success' );
+			}
+
 			return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' successfully handled', 'log_txt' => 'Webhook handled'];
 		}else{
 			return ['log_type' => 'error', 'log_msg' => 'order #'.$order_number.' failed', 'log_txt' => 'Not successfull status'];
