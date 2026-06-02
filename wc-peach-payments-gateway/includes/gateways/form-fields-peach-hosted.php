@@ -152,7 +152,7 @@ class PP_Gateway_Form_Fields_Peach_Hosted {
 			'embed_clientsecret' => array(
 				'title'       => __( 'Client Secret', 'woocommerce-gateway-peach-payments' ),
 				'type'        => 'text',
-				'description' => 'This can be found in the <a href="https://dashboard.peachpayments.com/" target="_blank" rel="nofollow">Peach Payments dashboard</a> under Checkout tab.'
+				'description' => 'This can be found in the <a href="https://dashboard.peachpayments.com/" target="_blank" rel="nofollow">Peach Payments dashboard</a> under Checkout tab. This value is used for optional Peach x-webhook-* HMAC signature validation.'
 			),
 			'embed_merchantid' => array(
 				'title'       => __( 'Merchant ID', 'woocommerce-gateway-peach-payments' ),
@@ -172,7 +172,7 @@ class PP_Gateway_Form_Fields_Peach_Hosted {
 			'secret' => array(
 				'title'       => 'Secret Token',
 				'type'        => 'text',
-				'description' => 'This can be found in the <a href="https://dashboard.peachpayments.com/" target="_blank" rel="nofollow">Peach Payments dashboard</a> under Checkout tab.'
+				'description' => 'This can be found in the <a href="https://dashboard.peachpayments.com/" target="_blank" rel="nofollow">Peach Payments dashboard</a> under Checkout tab. This value is used first for Peach Checkout payload-level webhook signature validation.'
 			),
 			'section_req_title' => [
 				'title' => 'Recurring/Subscription Payments',
@@ -191,7 +191,7 @@ class PP_Gateway_Form_Fields_Peach_Hosted {
 			'card_webhook_key' => array(
 				'title'       => 'Card Webhook Decryption key',
 				'type'        => 'text',
-				'description' => 'You’ll receive this key from Peach Payments after your webhook is enabled.<br>To enable the webhook, please email <a href="mailto:support@peachpayments.com">support@peachpayments.com</a> to set up <a href="https://www.peachpayments.com/" target="_blank" rel="nofollow">https://www.peachpayments.com/</a> on your account.'
+				'description' => 'You’ll receive this key from Peach Payments after your encrypted card webhook is enabled. This value is used for encrypted webhook payload decryption.<br>To enable the webhook, please email <a href="mailto:support@peachpayments.com">support@peachpayments.com</a> to set up <a href="https://www.peachpayments.com/" target="_blank" rel="nofollow">https://www.peachpayments.com/</a> on your account.'
 			),
 			'section_cart_title' => [
 				'title' => 'Cards',

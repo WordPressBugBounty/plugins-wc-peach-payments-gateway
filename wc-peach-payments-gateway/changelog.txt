@@ -1,4 +1,7 @@
-*** Peach Payments Gateway Changelog ***
+2026.06.02 - Version 4.0.3
+  * Enhancement - Added signature validation for webhooks
+  * Fix - Prevent Expired webhook from updating order status
+  * Fix - Prevent recurring payments from processing multiple times
 
 2026.04.30 - Version 4.0.2
   * Enhancement - Added support for failed recurring payment

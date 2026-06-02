@@ -55,7 +55,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		$this->method_title       = __( 'Peach Payments', 'woocommerce-gateway-peach-payments' );
 		$this->method_description = __( 'Secure hosted checkout and tokenised card payments via Peach Payments.', 'woocommerce-gateway-peach-payments' );
 		$this->has_fields         = false;
-		$this->supports           = [ 'products', 'refunds', 'subscriptions', 'subscription_cancellation', 'subscription_reactivation', 'subscription_suspension', 'subscription_amount_changes', 'subscription_date_changes', 'subscription_payment_method_change', 'subscription_payment_method_change_customer', 'multiple_subscriptions', 'manual_subscriptions', 'subscription_payment_method_change_admin', 'gateway_scheduled_payments' ];
+		$this->supports           = [ 'products', 'refunds', 'subscriptions', 'subscription_cancellation', 'subscription_reactivation', 'subscription_suspension', 'subscription_amount_changes', 'subscription_date_changes', 'subscription_payment_method_change', 'subscription_payment_method_change_customer', 'multiple_subscriptions', 'manual_subscriptions', 'subscription_payment_method_change_admin' ];
 
 		$this->icon = WC_PEACH_GATEWAY_URL . 'assets/images/Peach_Payments_Primary_logo.png';
 
@@ -273,73 +273,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	 * Handle the return from Peach Payments (resourcePath).
 	 */
 	public function handle_peach_return() {
-		if ( ! isset( $_GET['resourcePath'] ) || ! isset( $_GET['order_id'] ) ) {
-			wp_redirect( wc_get_page_permalink( 'cart' ) );
-			exit;
-		}
-	
-		$order_id      = absint( $_GET['order_id'] );
-		$resource_path = sanitize_text_field( $_GET['resourcePath'] );
-		$order         = wc_get_order( $order_id );
-	
-		if ( ! $order || ! $order->get_id() ) {
-			PP_Gateway_Logger::error( "[Hosted] Order not found: $order_id" );
-			wp_redirect( wc_get_page_permalink( 'cart' ) );
-			exit;
-		}
-	
-		// Call Peach API to get result
-		$url      = PP_Peach_API::get_endpoint_url( $resource_path );
-		$response = PP_Peach_API::request( $url, [], 'GET' );
-	
-		if ( is_wp_error( $response ) ) {
-			PP_Gateway_Logger::error( "[Hosted] API call failed for Order $order_id: " . $response->get_error_message() );
-			wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_safe_redirect( wc_get_checkout_url() );
-			exit;
-		}
-	
-		$result = json_decode( wp_remote_retrieve_body( $response ), true );
-	
-		PP_Gateway_Logger::debug( "[Hosted] Peach Response for Order $order_id: " . print_r( $result, true ) );
-	
-		$code               = $result['result']['code'] ?? '';
-		$peach_order_id     = $result['id'] ?? '';
-		$registration_id    = $result['registrationId'] ?? '';
-	
-		// Save payment_order_id if not already saved
-		if ( $peach_order_id && ! metadata_exists( 'post', $order_id, 'payment_order_id' ) ) {
-			$order->update_meta_data( 'payment_order_id', sanitize_text_field( $peach_order_id ) );
-			PP_Gateway_Logger::debug( "[Hosted] Stored payment_order_id: $peach_order_id for Order $order_id" );
-		}
-	
-		// Save registrationId if not already saved
-		if ( $registration_id && ! metadata_exists( 'post', $order_id, 'payment_registration_id' ) ) {
-			$order->update_meta_data( 'payment_registration_id', sanitize_text_field( $registration_id ) );
-			PP_Gateway_Logger::debug( "[Hosted] Stored payment_registration_id: $registration_id for Order $order_id" );
-		}
-		
-		$order->save();
-	
-		if ( str_starts_with( $code, '000.000.' ) || str_starts_with( $code, '000.100.1' ) ) {
-			PP_Gateway_Order_Utils::handle_payment_status( $order, $result );
-			wp_safe_redirect( $this->get_return_url( $order ) );
-			exit;
-	
-		} elseif ( str_starts_with( $code, '000.200.' ) ) {
-			// Payment pending
-			$order->update_status( 'on-hold', __( 'Payment pending via Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
-			wp_safe_redirect( $this->get_return_url( $order ) );
-			exit;
-	
-		} else {
-			// Payment failed
-			$order->update_status( 'failed', __( 'Payment failed or declined by Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
-			$order->add_order_note( 'Payment failed or declined by Peach Payments.',0,false);
-			wc_add_notice( __( 'Payment was declined. Please try again or use a different payment method.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_safe_redirect( wc_get_checkout_url() );
-			exit;
-		}
+		$this->handle_return_from_peach();
 	}
 
 
@@ -421,34 +355,116 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	
 	public function handle_return_from_peach() {
 		if ( ! isset( $_GET['order_id'] ) ) {
-			wp_die( 'Missing parameters.' );
+			wp_die( esc_html__( 'Missing order parameter.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 	
-		$order_id = absint( $_GET['order_id'] );
+		$order_id = absint( wp_unslash( $_GET['order_id'] ) );
 		$order    = wc_get_order( $order_id );
 	
-		if ( ! $order ) {
-			wp_die( 'Order not found.' );
+		if ( ! $order || ! is_a( $order, 'WC_Order' ) ) {
+			wp_die( esc_html__( 'Order not found.', WC_PEACH_TEXT_DOMAIN ) );
 		}
-	
-		$response = ( ! empty( $_POST ) && is_array( $_POST ) ) ? $_POST : [];
-	
-		if ( empty( $response ) ) {
-			PP_Gateway_Logger::warning( 'Peach return hit without POST payload for order #' . $order_id . '. Order left unchanged.' );
+
+		if ( $order->get_payment_method() !== $this->id ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': order does not use the Peach Payments gateway.' );
+			wp_safe_redirect( wc_get_checkout_url() );
+			exit;
+		}
+
+		$resource_path = '';
+		if ( isset( $_GET['resourcePath'] ) ) {
+			$resource_path = sanitize_text_field( wp_unslash( $_GET['resourcePath'] ) );
+		} elseif ( isset( $_POST['resourcePath'] ) ) {
+			$resource_path = sanitize_text_field( wp_unslash( $_POST['resourcePath'] ) );
+		}
+
+		$posted_transaction_id = '';
+		if ( isset( $_POST['id'] ) ) {
+			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['id'] ) );
+		} elseif ( isset( $_POST['payment_id'] ) ) {
+			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['payment_id'] ) );
+		} elseif ( isset( $_POST['paymentId'] ) ) {
+			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['paymentId'] ) );
+		}
+
+		if ( '' === $resource_path && '' === $posted_transaction_id ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order_id . ' did not include a resourcePath or transaction ID. Public POST result data was not trusted and the order was left unchanged.' );
+			wc_add_notice( __( 'We could not verify your Peach Payments transaction yet. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( $order->get_checkout_payment_url() );
+			exit;
+		}
+
+		$returned_order_key = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
+		if ( '' !== $returned_order_key && ! hash_equals( (string) $order->get_order_key(), (string) $returned_order_key ) ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': order key mismatch.' );
+			wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( $order->get_checkout_payment_url() );
+			exit;
+		}
+
+		$stored_return_token = trim( (string) $order->get_meta( '_peach_return_token', true ) );
+		$returned_token      = isset( $_GET['peach_return_token'] ) ? sanitize_text_field( wp_unslash( $_GET['peach_return_token'] ) ) : '';
+
+		if ( '' !== $stored_return_token && ! hash_equals( $stored_return_token, (string) $returned_token ) ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': return token mismatch.' );
+			wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( $order->get_checkout_payment_url() );
+			exit;
+		}
+
+		if ( '' !== $resource_path ) {
+			$resource_check = PP_Peach_API::validate_checkout_resource_for_order( $order, $resource_path );
+			if ( is_wp_error( $resource_check ) ) {
+				PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': ' . $resource_check->get_error_message() );
+				wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+				wp_safe_redirect( $order->get_checkout_payment_url() );
+				exit;
+			}
+
+			$result = PP_Peach_API::get_payment_result_from_resource_path( $resource_path );
+		} else {
+			PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order_id . ' used a POST transaction ID fallback. Posted payment result fields were ignored and the transaction was verified server-to-server.' );
+			$result = PP_Peach_API::get_payment_result_from_transaction_id( $posted_transaction_id );
+		}
+		if ( is_wp_error( $result ) ) {
+			PP_Gateway_Logger::error( 'Peach hosted return verification failed for order #' . $order_id . ': ' . $result->get_error_message() );
+			wc_add_notice( __( 'Payment verification failed. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( $order->get_checkout_payment_url() );
+			exit;
+		}
+
+
+		$validation = PP_Peach_API::validate_payment_result_for_order( $order, $result, 'hosted_return' );
+		if ( is_wp_error( $validation ) ) {
+			PP_Gateway_Logger::error( 'Peach hosted return rejected for order #' . $order_id . ': ' . $validation->get_error_message() . ' Response: ' . print_r( $result, true ) );
+			$order->add_order_note( 'Peach payment return rejected: ' . $validation->get_error_message() );
+			$order->save();
+			wc_add_notice( __( 'Payment verification failed. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( $order->get_checkout_payment_url() );
+			exit;
+		}
+
+		$code = isset( $result['result']['code'] ) ? sanitize_text_field( (string) $result['result']['code'] ) : '';
+
+		if ( 0 === strpos( $code, '000.200.' ) ) {
+			$order->update_status( 'on-hold', __( 'Payment pending via Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
+			$order->delete_meta_data( '_peach_return_token' );
+			$order->save();
 			wp_safe_redirect( $this->get_return_url( $order ) );
 			exit;
 		}
-	
-		if ( ! isset( $response['result_code'] ) && ! isset( $response['result']['code'] ) ) {
-			PP_Gateway_Logger::warning( 'Peach return hit without result code for order #' . $order_id . '. Order left unchanged. Response: ' . print_r( $response, true ) );
+
+		PP_Gateway_Order_Utils::handle_payment_status( $order, $result );
+		$order->delete_meta_data( '_peach_return_token' );
+		$order->save();
+
+		if ( PP_Gateway_Order_Utils::is_successful_result_code( $code ) || $order->is_paid() ) {
 			wp_safe_redirect( $this->get_return_url( $order ) );
 			exit;
 		}
-	
-		PP_Gateway_Order_Utils::handle_payment_status( $order, $response );
-	
-		// Redirect to order received page
-		wp_safe_redirect( $this->get_return_url( $order ) );
+
+		wc_add_notice( __( 'Payment was declined. Please try again or use a different payment method.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+		wp_safe_redirect( wc_get_checkout_url() );
 		exit;
 	}
 

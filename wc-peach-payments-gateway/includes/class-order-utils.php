@@ -359,10 +359,11 @@ class PP_Gateway_Order_Utils {
 			return;
 		}
 	
-		// Save changes
+		// Save changes before handing the paid renewal order back to WooCommerce Subscriptions.
 		$order->save();
 	
 		if ( class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+			PP_Gateway_Subscription_Handler::record_renewal_payment_success_with_subscriptions( $order, $transaction_id );
 			PP_Gateway_Subscription_Handler::sync_payment_meta_from_order_to_subscriptions( $order, 'recurring_payment_success' );
 		}
 	}
@@ -424,7 +425,6 @@ class PP_Gateway_Order_Utils {
 	public static function handle_payment_status( WC_Order $order, array $response ) {
 		$response = wp_unslash( $response );
 
-		PP_Gateway_Logger::info( 'Peach Response. ' . print_r( $response, true ) );
 
 		// Normalise: support both flat 'result_code' (return/webhook path) and nested 'result[code]' (API path).
 		if ( ! isset( $response['result_code'] ) && isset( $response['result']['code'] ) ) {
@@ -461,20 +461,17 @@ class PP_Gateway_Order_Utils {
 		if ( self::is_successful_result_code( $status_code ) ) {
 
 			if ( self::initial_payment_already_processed( $order, $transaction_id ) ) {
-				PP_Gateway_Logger::info( 'Peach Payments success ignored for already-processed order #' . $order->get_id() . '. Transaction ID: ' . ( $transaction_id ?: 'N/A' ) );
 				$order->save();
 				return;
 			}
 
 			$lock_acquired = self::acquire_initial_payment_lock( $order );
 			if ( ! $lock_acquired ) {
-				PP_Gateway_Logger::info( 'Peach Payments success ignored because another request is already processing order #' . $order->get_id() . '. Transaction ID: ' . ( $transaction_id ?: 'N/A' ) );
 				return;
 			}
 
 			try {
 				if ( self::initial_payment_already_processed( $order, $transaction_id ) ) {
-					PP_Gateway_Logger::info( 'Peach Payments success ignored after lock because order #' . $order->get_id() . ' is already processed. Transaction ID: ' . ( $transaction_id ?: 'N/A' ) );
 					$order->save();
 					return;
 				}
@@ -631,9 +628,14 @@ class PP_Gateway_Order_Utils {
 	public static function get_user_card_tokens( $user_id ) {
 		$saved_cards = [];
 		$user_cards = get_user_meta( $user_id, 'my-cards', true );
+		if ( ! is_array( $user_cards ) ) {
+			return $saved_cards;
+		}
 		
 		foreach ( $user_cards as $index => $card ) {
-			$saved_cards[] = $card['id'];
+			if ( isset( $card['id'] ) ) {
+				$saved_cards[] = $card['id'];
+			}
 		}
 		
 		return $saved_cards;

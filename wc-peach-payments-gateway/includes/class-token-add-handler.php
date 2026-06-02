@@ -187,7 +187,24 @@ class PP_Gateway_Token_Add_Handler {
 		}
 		
 		//$result_url = wc_get_account_endpoint_url( 'my-cards' );
-		$result_url = add_query_arg( 'pp_add_card_return', '1', home_url( '/' ) );
+		$card_return_token = wp_generate_password( 32, false );
+		set_transient(
+			self::get_card_return_transient_key( $user_id, $card_return_token ),
+			[
+				'user_id' => $user_id,
+				'merchant_transaction_id' => $order_number,
+				'amount' => number_format( (float) $total, 2, '.', '' ),
+				'currency' => $currency,
+			],
+			HOUR_IN_SECONDS
+		);
+		$result_url = add_query_arg(
+			[
+				'pp_add_card_return' => '1',
+				'pp_card_token' => $card_return_token,
+			],
+			home_url( '/' )
+		);
 		
 		// Prepare payload
 		$payload = [
@@ -232,6 +249,7 @@ class PP_Gateway_Token_Add_Handler {
 		//PP_Gateway_Logger::info( "Add Card Checkout Session. ".print_r($response, true) );
 		
 		if ( empty( $response['redirectUrl'] ) ) {
+			delete_transient( self::get_card_return_transient_key( $user_id, $card_return_token ) );
 			PP_Peach_API::log_error( 'Redirect URL', $payload, $response, '' );
 			wp_send_json_error( [ 'message' => 'Registration ID not received.', 'response' => $body ], 400 );
 		}else{
@@ -239,32 +257,110 @@ class PP_Gateway_Token_Add_Handler {
 		}
 	}
 	
+	private static function get_card_return_transient_key( $user_id, $token ) {
+		return 'peach_card_return_' . absint( $user_id ) . '_' . md5( (string) $token );
+	}
+
 	public static function maybe_handle_resource_path() {
-		if ( ! is_user_logged_in() || empty( $_GET['resourcePath'] ) || empty( $_GET['pp_add_card_return'] ) ) {
+		if ( ! isset( $_GET['pp_add_card_return'] ) ) {
 			return;
+		}
+
+		if ( ! is_user_logged_in() ) {
+			wc_add_notice( __( 'Please log in before saving a Peach Payments card.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
+		}
+
+		if ( empty( $_GET['resourcePath'] ) || empty( $_GET['pp_card_token'] ) ) {
+			wc_add_notice( __( 'Card registration could not be verified.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
 		}
 	
 		$resource_path = sanitize_text_field( wp_unslash( $_GET['resourcePath'] ) );
+		$return_token  = sanitize_text_field( wp_unslash( $_GET['pp_card_token'] ) );
 		$user_id       = get_current_user_id();
+		$transient_key = self::get_card_return_transient_key( $user_id, $return_token );
+		$expected      = get_transient( $transient_key );
+
+		if ( ! is_array( $expected ) || empty( $expected['merchant_transaction_id'] ) || (int) $expected['user_id'] !== (int) $user_id ) {
+			PP_Gateway_Logger::warning( 'Peach add-card return rejected for user #' . $user_id . ': return token missing or expired.' );
+			wc_add_notice( __( 'Card registration could not be verified. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
+		}
 	
 		$response = PP_Peach_API::get_registration_result( $resource_path );
 	
 		if ( is_wp_error( $response ) ) {
+			PP_Gateway_Logger::error( 'Peach add-card verification failed for user #' . $user_id . ': ' . $response->get_error_message() );
 			wc_add_notice( __( 'Failed to retrieve card registration.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
+		}
+
+		$result_code = isset( $response['result']['code'] ) ? sanitize_text_field( (string) $response['result']['code'] ) : '';
+		if ( '' === $result_code || ! PP_Gateway_Order_Utils::is_successful_result_code( $result_code ) ) {
+			delete_transient( $transient_key );
+			PP_Gateway_Logger::warning( 'Peach add-card registration failed for user #' . $user_id . '. Response: ' . print_r( $response, true ) );
+			wc_add_notice( __( 'Card registration failed.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
+		}
+
+		$received_reference = isset( $response['merchantTransactionId'] ) ? sanitize_text_field( (string) $response['merchantTransactionId'] ) : '';
+		if ( '' === $received_reference && isset( $response['merchantInvoiceId'] ) ) {
+			$received_reference = sanitize_text_field( (string) $response['merchantInvoiceId'] );
+		}
+
+		if ( ! PP_Peach_API::merchant_references_match( (string) $expected['merchant_transaction_id'], $received_reference ) ) {
+			delete_transient( $transient_key );
+			PP_Gateway_Logger::error( 'Peach add-card return rejected for user #' . $user_id . ': merchant reference mismatch. Response: ' . print_r( $response, true ) );
+			wc_add_notice( __( 'Card registration could not be verified. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
+		}
+
+		if ( isset( $response['amount'] ) && number_format( (float) $response['amount'], 2, '.', '' ) !== number_format( (float) $expected['amount'], 2, '.', '' ) ) {
+			delete_transient( $transient_key );
+			PP_Gateway_Logger::error( 'Peach add-card return rejected for user #' . $user_id . ': amount mismatch. Response: ' . print_r( $response, true ) );
+			wc_add_notice( __( 'Card registration could not be verified. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+			exit;
+		}
+
+		if ( isset( $response['currency'] ) && strtoupper( (string) $response['currency'] ) !== strtoupper( (string) $expected['currency'] ) ) {
+			delete_transient( $transient_key );
+			PP_Gateway_Logger::error( 'Peach add-card return rejected for user #' . $user_id . ': currency mismatch. Response: ' . print_r( $response, true ) );
+			wc_add_notice( __( 'Card registration could not be verified. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
 			exit;
 		}
 	
 		if ( isset( $response['card'] ) ) {
-			// Save card data to user_meta
+			$registration_id = isset( $response['registrationId'] ) ? sanitize_text_field( (string) $response['registrationId'] ) : '';
+			if ( '' === $registration_id && isset( $response['id'] ) ) {
+				$registration_id = sanitize_text_field( (string) $response['id'] );
+			}
+
+			if ( '' === $registration_id ) {
+				delete_transient( $transient_key );
+				wc_add_notice( __( 'Card registration failed.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+				wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
+				exit;
+			}
+
+			// Save card data to user_meta only after the Peach result has been verified server-to-server.
 			PP_Gateway_Card_Manager::save_card( $user_id, [
-				'id'        => sanitize_text_field( $response['id'] ),
-				'num'       => 'xxxx-' . $response['card']['last4Digits'],
-				'holder'    => sanitize_text_field( $response['card']['holder'] ),
-				'brand'     => sanitize_text_field( $response['paymentBrand'] ),
-				'exp_year'  => sanitize_text_field( $response['card']['expiryYear'] ),
-				'exp_month' => sanitize_text_field( $response['card']['expiryMonth'] ),
+				'id'        => $registration_id,
+				'num'       => 'xxxx-' . sanitize_text_field( $response['card']['last4Digits'] ?? '' ),
+				'holder'    => sanitize_text_field( $response['card']['holder'] ?? '' ),
+				'brand'     => sanitize_text_field( $response['paymentBrand'] ?? '' ),
+				'exp_year'  => sanitize_text_field( $response['card']['expiryYear'] ?? '' ),
+				'exp_month' => sanitize_text_field( $response['card']['expiryMonth'] ?? '' ),
 			] );
+			delete_transient( $transient_key );
 	
 			wc_add_notice( __( 'Card saved successfully.', WC_PEACH_TEXT_DOMAIN ), 'success' );
 
@@ -282,9 +378,11 @@ class PP_Gateway_Token_Add_Handler {
 					} else {
 						PP_Gateway_Logger::warning( 'Card add reversal not successful. Transaction ID: ' . sanitize_text_field( $response['id'] ) . ' | Result: ' . ( $rv_result_code ?: 'N/A' ) . ( $rv_result_desc ? ' - ' . $rv_result_desc : '' ) );
 					}
-				}}
+				}
+			}
 
 		} else {
+			delete_transient( $transient_key );
 			wc_add_notice( __( 'Card registration failed.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 		}
 	

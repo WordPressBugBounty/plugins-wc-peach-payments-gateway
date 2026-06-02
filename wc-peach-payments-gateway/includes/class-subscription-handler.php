@@ -24,6 +24,13 @@ class PP_Gateway_Subscription_Handler {
 	protected static $scheduled_action_pre_state = [];
 
 	/**
+	 * Track admin renewal orders processed by this request-level fallback.
+	 *
+	 * @var array
+	 */
+	protected static $admin_fallback_processed_orders = [];
+
+	/**
 	 * Register hooks.
 	 */
 	public static function register() {
@@ -33,14 +40,12 @@ class PP_Gateway_Subscription_Handler {
 		add_filter( 'woocommerce_subscription_payment_meta', [ __CLASS__, 'add_subscription_payment_meta' ], 10, 2 );
 		add_action( 'woocommerce_subscription_validate_payment_meta', [ __CLASS__, 'validate_subscription_payment_meta' ], 10, 2 );
 		add_action( 'woocommerce_order_action_wcs_process_renewal', [ __CLASS__, 'capture_admin_renewal_pre_state' ], 1 );
-		add_action( 'woocommerce_order_action_wcs_process_renewal', [ __CLASS__, 'prepare_admin_renewal_request' ], 5 );
-		add_action( 'woocommerce_order_action_wcs_process_renewal', [ __CLASS__, 'maybe_force_admin_process_renewal' ], 999 );
 		add_action( 'woocommerce_order_action_wcs_create_pending_renewal', [ __CLASS__, 'capture_admin_renewal_pre_state' ], 1 );
+		add_action( 'woocommerce_order_action_wcs_process_renewal', [ __CLASS__, 'prepare_admin_renewal_request' ], 5 );
 		add_action( 'woocommerce_order_action_wcs_create_pending_renewal', [ __CLASS__, 'prepare_admin_renewal_request' ], 5 );
+		add_action( 'woocommerce_order_action_wcs_process_renewal', [ __CLASS__, 'maybe_force_admin_process_renewal' ], 999 );
 		add_action( 'woocommerce_order_action_wcs_create_pending_renewal', [ __CLASS__, 'maybe_force_admin_create_pending_renewal' ], 999 );
-		add_action( 'woocommerce_scheduled_subscription_payment', [ __CLASS__, 'capture_scheduled_renewal_pre_state' ], 1, 1 );
 		add_action( 'woocommerce_scheduled_subscription_payment', [ __CLASS__, 'prepare_scheduled_renewal_request' ], 5, 1 );
-		add_action( 'woocommerce_scheduled_subscription_payment', [ __CLASS__, 'maybe_force_scheduled_subscription_payment' ], 999, 1 );
 	}
 
 	/**
@@ -56,6 +61,11 @@ class PP_Gateway_Subscription_Handler {
 		}
 
 		$order_id = $order->get_id();
+
+		if ( self::renewal_payment_already_processed( $order ) ) {
+			self::add_unique_order_note( $order, 'Peach Payments: renewal charge skipped because this renewal order is already paid or already processed.' );
+			return;
+		}
 
 		if ( wcs_order_contains_renewal( $order_id ) ) {
 			$parent_order_id = WC_Subscriptions_Renewal_Order::get_parent_order_id( $order_id );
@@ -82,15 +92,6 @@ class PP_Gateway_Subscription_Handler {
 		$payment_data = self::get_recurring_payment_data( $order, $parent_order );
 		$registration_id = $payment_data['registration_id'];
 
-		PP_Gateway_Logger::info(
-			sprintf(
-				'Renewal payment attempt starting for renewal order #%1$d (parent #%2$d). Amount: %3$s. Registration source: %4$s.',
-				$order_id,
-				$parent_order_id,
-				number_format( (float) $amount_to_charge, 2, '.', '' ),
-				$payment_data['source']
-			)
-		);
 
 		if ( ! is_string( $registration_id ) || '' === $registration_id ) {
 			$order->add_order_note( 'Peach Payments renewal failed — missing saved card token (registration ID).', 0, false );
@@ -107,27 +108,73 @@ class PP_Gateway_Subscription_Handler {
 			return;
 		}
 
-		$api      = new PP_Peach_API();
-		$response = $api->charge_saved_card( $registration_id, $order, $amount_to_charge );
+		// Do not block a new renewal order merely because another renewal for the same
+		// subscription and amount was paid recently. WooCommerce Subscriptions can
+		// legitimately create another renewal order during admin testing, catch-up
+		// processing, or short renewal intervals. Per-order and active subscription
+		// locks below still prevent concurrent duplicate charges.
 
-		if ( is_wp_error( $response ) ) {
-			$message = $response->get_error_message();
-			$order->add_order_note( 'Peach Payments renewal failed: ' . $message, 0, false );
-			PP_Gateway_Order_Utils::handle_subscription_payment_failure(
-				$order,
-				$message,
-				'',
-				[
-					'parent_order_id'      => $parent_order_id,
-					'reason'               => 'api_wp_error',
-					'registration_source'  => $payment_data['source'],
-					'registration_id_tail' => self::mask_meta_value( $registration_id ),
-				]
-			);
+		if ( ! self::acquire_renewal_payment_lock( $order ) ) {
+			self::add_unique_order_note( $order, 'Peach Payments: renewal charge skipped because another request is already processing this renewal order.' );
 			return;
 		}
 
-		PP_Gateway_Order_Utils::handle_subscription_payment_status( $order, $response );
+		if ( ! self::acquire_subscription_renewal_charge_locks( $order ) ) {
+			self::add_unique_order_note( $order, 'Peach Payments: renewal charge skipped because another Peach renewal charge is already processing for the related subscription.' );
+			self::release_renewal_payment_lock( $order );
+			return;
+		}
+
+		try {
+			if ( self::renewal_payment_already_processed( $order ) ) {
+				self::add_unique_order_note( $order, 'Peach Payments: renewal charge skipped because this renewal order became paid or processed while waiting.' );
+				return;
+			}
+
+			// After the active processing locks have been acquired, only this exact
+			// renewal order should be treated as idempotent. A separate renewal order
+			// is a separate WooCommerce Subscriptions billing event and must be allowed
+			// to charge even if it is close in time to the previous renewal.
+
+			$api      = new PP_Peach_API();
+			$response = $api->charge_saved_card( $registration_id, $order, $amount_to_charge );
+
+			if ( is_wp_error( $response ) ) {
+				$message = $response->get_error_message();
+				$order->add_order_note( 'Peach Payments renewal failed: ' . $message, 0, false );
+				PP_Gateway_Order_Utils::handle_subscription_payment_failure(
+					$order,
+					$message,
+					'',
+					[
+						'parent_order_id'      => $parent_order_id,
+						'reason'               => 'api_wp_error',
+						'registration_source'  => $payment_data['source'],
+						'registration_id_tail' => self::mask_meta_value( $registration_id ),
+					]
+				);
+				return;
+			}
+
+			self::mark_renewal_payment_processed( $order, isset( $response['id'] ) ? $response['id'] : '', 'api_charge_saved_card' );
+			PP_Gateway_Order_Utils::handle_subscription_payment_status( $order, $response );
+		} catch ( Throwable $e ) {
+			$message = $e->getMessage();
+			$order->add_order_note( 'Peach Payments renewal failed because an unexpected error occurred: ' . $message, 0, false );
+			PP_Gateway_Logger::error( sprintf( 'Unexpected error while processing Peach renewal order #%1$d: %2$s in %3$s:%4$d', $order_id, $message, $e->getFile(), $e->getLine() ) );
+			PP_Gateway_Order_Utils::handle_subscription_payment_failure(
+				$order,
+				sprintf( __( 'Unexpected renewal processing error: %s', WC_PEACH_TEXT_DOMAIN ), $message ),
+				'',
+				[
+					'parent_order_id' => $parent_order_id,
+					'reason'          => 'unexpected_throwable',
+				]
+			);
+		} finally {
+			self::release_subscription_renewal_charge_locks( $order );
+			self::release_renewal_payment_lock( $order );
+		}
 	}
 
 
@@ -155,10 +202,6 @@ class PP_Gateway_Subscription_Handler {
 		}
 
 		$backfilled = self::maybe_backfill_subscription_payment_meta_from_parent( $subscription );
-		$message    = sprintf( 'Peach Payments: admin renewal action preparation started for subscription #%d.', $subscription->get_id() );
-
-		PP_Gateway_Logger::info( $message );
-		$subscription->add_order_note( $message, 0, false );
 
 		if ( $backfilled ) {
 			$subscription->save();
@@ -210,7 +253,6 @@ class PP_Gateway_Subscription_Handler {
 
 		$backfilled = self::maybe_backfill_subscription_payment_meta_from_parent( $subscription );
 
-		PP_Gateway_Logger::info( sprintf( 'Peach Payments: scheduled renewal action preparation started for subscription #%d.', $subscription->get_id() ) );
 
 		if ( $backfilled ) {
 			$subscription->save();
@@ -228,48 +270,6 @@ class PP_Gateway_Subscription_Handler {
 			return;
 		}
 
-		$subscription_id = $subscription->get_id();
-		$before_ids      = self::$scheduled_action_pre_state[ $subscription_id ] ?? [];
-		$after_ids       = self::get_related_renewal_order_ids( $subscription );
-		$new_ids         = array_values( array_diff( $after_ids, $before_ids ) );
-
-		if ( ! empty( $new_ids ) ) {
-			PP_Gateway_Logger::info( sprintf( 'Peach Payments: core scheduled renewal action created renewal order(s) for subscription #%1$d: %2$s.', $subscription_id, implode( ',', $new_ids ) ) );
-			return;
-		}
-
-		if ( ! function_exists( 'wcs_create_renewal_order' ) ) {
-			$message = sprintf( 'Peach Payments scheduled renewal fallback failed for subscription #%d because wcs_create_renewal_order() is unavailable.', $subscription_id );
-			PP_Gateway_Logger::error( $message );
-			self::add_unique_order_note( $subscription, $message );
-			return;
-		}
-
-		try {
-			$renewal_order = wcs_create_renewal_order( $subscription );
-		} catch ( Exception $e ) {
-			$message = sprintf( 'Peach Payments scheduled renewal fallback failed for subscription #%1$d: %2$s', $subscription_id, $e->getMessage() );
-			PP_Gateway_Logger::error( $message );
-			self::add_unique_order_note( $subscription, $message );
-			return;
-		}
-
-		if ( is_wp_error( $renewal_order ) || ! is_a( $renewal_order, 'WC_Order' ) ) {
-			$message = sprintf( 'Peach Payments scheduled renewal fallback failed for subscription #%d because no renewal order could be created.', $subscription_id );
-			if ( is_wp_error( $renewal_order ) ) {
-				$message .= ' ' . $renewal_order->get_error_message();
-			}
-			PP_Gateway_Logger::error( $message );
-			self::add_unique_order_note( $subscription, $message );
-			return;
-		}
-
-		self::add_unique_order_note( $renewal_order, 'Peach Payments: renewal order created via gateway fallback from scheduled action.' );
-		self::add_unique_order_note( $subscription, sprintf( 'Peach Payments: renewal order #%d created via gateway fallback from scheduled action.', $renewal_order->get_id() ) );
-
-		$amount_to_charge = (float) $renewal_order->get_total();
-		PP_Gateway_Logger::info( sprintf( 'Peach Payments: processing scheduled fallback renewal order #%1$d for subscription #%2$d. Amount %3$s.', $renewal_order->get_id(), $subscription_id, number_format( $amount_to_charge, 2, '.', '' ) ) );
-		do_action( 'woocommerce_scheduled_subscription_payment_peach-payments', $amount_to_charge, $renewal_order );
 	}
 
 	/**
@@ -279,53 +279,194 @@ class PP_Gateway_Subscription_Handler {
 	 * @param bool                     $process_payment Whether to process payment immediately.
 	 */
 	protected static function maybe_force_admin_renewal_action( $subscription, $process_payment ) {
+		$subscription = self::normalize_subscription( $subscription );
+
 		if ( ! self::is_peach_subscription( $subscription ) ) {
 			return;
 		}
 
 		$subscription_id = $subscription->get_id();
-		$before_ids      = self::$admin_action_pre_state[ $subscription_id ] ?? [];
+		$before_ids      = isset( self::$admin_action_pre_state[ $subscription_id ] ) ? self::$admin_action_pre_state[ $subscription_id ] : [];
 		$after_ids       = self::get_related_renewal_order_ids( $subscription );
-		$new_ids         = array_values( array_diff( $after_ids, $before_ids ) );
+		$new_order_ids   = array_values( array_diff( $after_ids, $before_ids ) );
 
-		if ( ! empty( $new_ids ) ) {
-			PP_Gateway_Logger::info( sprintf( 'Peach Payments: core admin renewal action created renewal order(s) for subscription #%1$d: %2$s.', $subscription_id, implode( ',', $new_ids ) ) );
+		if ( ! empty( $new_order_ids ) ) {
+			$renewal_order_id = absint( end( $new_order_ids ) );
+			$renewal_order    = wc_get_order( $renewal_order_id );
+
+			if ( is_a( $renewal_order, 'WC_Order' ) ) {
+				self::ensure_renewal_order_has_peach_data( $renewal_order, $subscription );
+
+				if ( $process_payment ) {
+					self::maybe_process_admin_renewal_order( $subscription, $renewal_order, 'woocommerce_core_created_order' );
+				}
+			}
+
+			unset( self::$admin_action_pre_state[ $subscription_id ] );
 			return;
 		}
 
 		if ( ! function_exists( 'wcs_create_renewal_order' ) ) {
-			$message = sprintf( 'Peach Payments admin renewal fallback failed for subscription #%d because wcs_create_renewal_order() is unavailable.', $subscription_id );
-			PP_Gateway_Logger::error( $message );
+			$message = sprintf( 'Peach Payments: admin renewal fallback could not create a renewal order for subscription #%d because wcs_create_renewal_order() is unavailable.', $subscription_id );
 			self::add_unique_order_note( $subscription, $message );
+			PP_Gateway_Logger::error( $message );
+			unset( self::$admin_action_pre_state[ $subscription_id ] );
 			return;
 		}
 
 		try {
 			$renewal_order = wcs_create_renewal_order( $subscription );
-		} catch ( Exception $e ) {
-			$message = sprintf( 'Peach Payments admin renewal fallback failed for subscription #%1$d: %2$s', $subscription_id, $e->getMessage() );
-			PP_Gateway_Logger::error( $message );
+		} catch ( Throwable $e ) {
+			$message = sprintf( 'Peach Payments: admin renewal fallback failed to create a renewal order for subscription #%1$d. Error: %2$s', $subscription_id, $e->getMessage() );
 			self::add_unique_order_note( $subscription, $message );
+			PP_Gateway_Logger::error( $message . ' in ' . $e->getFile() . ':' . $e->getLine() );
+			unset( self::$admin_action_pre_state[ $subscription_id ] );
 			return;
 		}
 
-		if ( is_wp_error( $renewal_order ) || ! is_a( $renewal_order, 'WC_Order' ) ) {
-			$message = sprintf( 'Peach Payments admin renewal fallback failed for subscription #%d because no renewal order could be created.', $subscription_id );
-			if ( is_wp_error( $renewal_order ) ) {
-				$message .= ' ' . $renewal_order->get_error_message();
-			}
-			PP_Gateway_Logger::error( $message );
+		if ( is_wp_error( $renewal_order ) ) {
+			$message = sprintf( 'Peach Payments: admin renewal fallback failed to create a renewal order for subscription #%1$d. Error: %2$s', $subscription_id, $renewal_order->get_error_message() );
 			self::add_unique_order_note( $subscription, $message );
+			PP_Gateway_Logger::error( $message );
+			unset( self::$admin_action_pre_state[ $subscription_id ] );
 			return;
 		}
 
-		self::add_unique_order_note( $renewal_order, 'Peach Payments: renewal order created via gateway fallback from admin action.' );
-		self::add_unique_order_note( $subscription, sprintf( 'Peach Payments: renewal order #%d created via gateway fallback from admin action.', $renewal_order->get_id() ) );
+		if ( ! is_a( $renewal_order, 'WC_Order' ) ) {
+			$message = sprintf( 'Peach Payments: admin renewal fallback did not receive a valid renewal order object for subscription #%d.', $subscription_id );
+			self::add_unique_order_note( $subscription, $message );
+			PP_Gateway_Logger::error( $message );
+			unset( self::$admin_action_pre_state[ $subscription_id ] );
+			return;
+		}
+
+		self::ensure_renewal_order_has_peach_data( $renewal_order, $subscription );
+
+		$message = sprintf( 'Peach Payments: admin renewal fallback created renewal order #%d after WooCommerce Subscriptions did not create one during the admin action.', $renewal_order->get_id() );
+		self::add_unique_order_note( $subscription, $message );
+		self::add_unique_order_note( $renewal_order, $message );
+		PP_Gateway_Logger::warning( $message );
 
 		if ( $process_payment ) {
-			$amount_to_charge = (float) $renewal_order->get_total();
-			PP_Gateway_Logger::info( sprintf( 'Peach Payments: processing fallback renewal order #%1$d for subscription #%2$d. Amount %3$s.', $renewal_order->get_id(), $subscription_id, number_format( $amount_to_charge, 2, '.', '' ) ) );
-			do_action( 'woocommerce_scheduled_subscription_payment_peach-payments', $amount_to_charge, $renewal_order );
+			self::maybe_process_admin_renewal_order( $subscription, $renewal_order, 'plugin_admin_fallback_created_order' );
+		} elseif ( in_array( $renewal_order->get_status(), [ 'checkout-draft', 'auto-draft' ], true ) ) {
+			$renewal_order->update_status( 'pending', __( 'Pending renewal order created by Peach Payments admin fallback.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		unset( self::$admin_action_pre_state[ $subscription_id ] );
+	}
+
+	/**
+	 * Ensure a renewal order has the Peach gateway and recurring metadata copied from its subscription.
+	 *
+	 * @param WC_Order $renewal_order Renewal order object.
+	 * @param WC_Order $subscription  Subscription object.
+	 * @return void
+	 */
+	protected static function ensure_renewal_order_has_peach_data( $renewal_order, $subscription ) {
+		if ( ! is_a( $renewal_order, 'WC_Order' ) || ! self::is_peach_subscription( $subscription ) ) {
+			return;
+		}
+
+		if ( 'peach-payments' !== $renewal_order->get_payment_method() ) {
+			$renewal_order->set_payment_method( 'peach-payments' );
+			$renewal_order->set_payment_method_title( 'Peach Payments' );
+		}
+
+		self::maybe_backfill_subscription_payment_meta_from_parent( $subscription );
+		$meta_to_sync = self::get_payment_meta_from_order( $subscription );
+		self::sync_payment_meta_to_order( $renewal_order, $meta_to_sync );
+	}
+
+	/**
+	 * Process an admin-created renewal order when WooCommerce Subscriptions did not do so itself.
+	 *
+	 * @param WC_Order $subscription  Subscription object.
+	 * @param WC_Order $renewal_order Renewal order object.
+	 * @param string   $source        Fallback source/context.
+	 * @return void
+	 */
+	protected static function maybe_process_admin_renewal_order( $subscription, $renewal_order, $source ) {
+		if ( ! is_a( $renewal_order, 'WC_Order' ) || ! self::is_peach_subscription( $subscription ) ) {
+			return;
+		}
+
+		$renewal_order_id = $renewal_order->get_id();
+
+		if ( isset( self::$admin_fallback_processed_orders[ $renewal_order_id ] ) ) {
+			return;
+		}
+
+		if ( self::renewal_payment_already_processed( $renewal_order ) ) {
+			return;
+		}
+
+		self::$admin_fallback_processed_orders[ $renewal_order_id ] = true;
+
+		self::process_renewal_payment( (float) $renewal_order->get_total(), $renewal_order );
+	}
+
+	/**
+	 * Record a successful Peach renewal through WooCommerce Subscriptions' official renewal lifecycle.
+	 *
+	 * Peach charges saved cards from the WooCommerce Subscriptions scheduled-payment hook.
+	 * After a successful gateway charge, Subscriptions must be told that the renewal
+	 * order has been paid so it can advance dates, add the correct subscription notes,
+	 * fire renewal-complete hooks, and schedule the next renewal action.
+	 *
+	 * @param WC_Order $order          Renewal order object.
+	 * @param string   $transaction_id Peach transaction ID.
+	 * @return void
+	 */
+	public static function record_renewal_payment_success_with_subscriptions( $order, $transaction_id = '' ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		if ( ! function_exists( 'wcs_order_contains_renewal' ) || ! wcs_order_contains_renewal( $order ) ) {
+			return;
+		}
+
+		if ( $order->get_meta( '_peach_wcs_renewal_success_recorded', true ) ) {
+			return;
+		}
+
+		if ( ! class_exists( 'WC_Subscriptions_Manager' ) || ! method_exists( 'WC_Subscriptions_Manager', 'process_subscription_payments_on_order' ) ) {
+			PP_Gateway_Logger::warning( sprintf( 'Peach Payments could not hand renewal order #%d to WooCommerce Subscriptions because WC_Subscriptions_Manager::process_subscription_payments_on_order() is unavailable.', $order->get_id() ) );
+			self::add_unique_order_note( $order, 'Peach Payments: renewal was paid, but WooCommerce Subscriptions payment-recording API was unavailable. Please verify the subscription next payment date and scheduled action.' );
+			return;
+		}
+
+		try {
+			WC_Subscriptions_Manager::process_subscription_payments_on_order( $order );
+
+			$order->update_meta_data( '_peach_wcs_renewal_success_recorded', time() );
+			if ( '' !== (string) $transaction_id ) {
+				$order->update_meta_data( '_peach_wcs_renewal_success_recorded_txn', sanitize_text_field( (string) $transaction_id ) );
+			}
+			$order->save();
+
+			self::add_unique_order_note( $order, 'Peach Payments: successful renewal payment recorded with WooCommerce Subscriptions so the next renewal can be scheduled.' );
+		} catch ( TypeError $e ) {
+			try {
+				WC_Subscriptions_Manager::process_subscription_payments_on_order( $order->get_id() );
+
+				$order->update_meta_data( '_peach_wcs_renewal_success_recorded', time() );
+				if ( '' !== (string) $transaction_id ) {
+					$order->update_meta_data( '_peach_wcs_renewal_success_recorded_txn', sanitize_text_field( (string) $transaction_id ) );
+				}
+				$order->save();
+
+				self::add_unique_order_note( $order, 'Peach Payments: successful renewal payment recorded with WooCommerce Subscriptions so the next renewal can be scheduled.' );
+			} catch ( Throwable $fallback_error ) {
+				$message = sprintf( 'Peach Payments: renewal payment was successful, but WooCommerce Subscriptions did not record the renewal lifecycle. Error: %s', $fallback_error->getMessage() );
+				self::add_unique_order_note( $order, $message );
+				PP_Gateway_Logger::error( sprintf( 'Failed to record Peach renewal order #%1$d with WooCommerce Subscriptions. Error: %2$s in %3$s:%4$d', $order->get_id(), $fallback_error->getMessage(), $fallback_error->getFile(), $fallback_error->getLine() ) );
+			}
+		} catch ( Throwable $e ) {
+			$message = sprintf( 'Peach Payments: renewal payment was successful, but WooCommerce Subscriptions did not record the renewal lifecycle. Error: %s', $e->getMessage() );
+			self::add_unique_order_note( $order, $message );
+			PP_Gateway_Logger::error( sprintf( 'Failed to record Peach renewal order #%1$d with WooCommerce Subscriptions. Error: %2$s in %3$s:%4$d', $order->get_id(), $e->getMessage(), $e->getFile(), $e->getLine() ) );
 		}
 	}
 
@@ -345,8 +486,302 @@ class PP_Gateway_Subscription_Handler {
 			return;
 		}
 
-		PP_Gateway_Logger::info( sprintf( 'WooCommerce Subscriptions scheduled retry triggered for Peach renewal order #%d.', $renewal_order_id ) );
 		self::add_unique_order_note( $order, 'Peach Payments: WooCommerce Subscriptions scheduled retry triggered for this renewal order.' );
+	}
+
+	/**
+	 * Check whether a renewal order has already been paid/processed by Peach.
+	 *
+	 * @param WC_Order $order Renewal order object.
+	 * @return bool
+	 */
+	protected static function renewal_payment_already_processed( $order ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return false;
+		}
+
+		if ( $order->is_paid() ) {
+			return true;
+		}
+
+		if ( $order->get_meta( '_peach_renewal_payment_processed', true ) ) {
+			return true;
+		}
+
+		$stored_transaction_id    = trim( (string) $order->get_transaction_id() );
+		$stored_payment_order_id  = trim( (string) $order->get_meta( 'payment_order_id', true ) );
+		$has_peach_transaction_id = ( '' !== $stored_transaction_id || '' !== $stored_payment_order_id );
+
+		if ( $has_peach_transaction_id && class_exists( 'PP_Gateway_Order_Utils' ) && ! PP_Gateway_Order_Utils::order_status_checks( $order ) ) {
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Acquire a short-lived lock before sending a renewal charge to Peach for this order.
+	 *
+	 * @param WC_Order $order Renewal order object.
+	 * @return bool
+	 */
+	protected static function acquire_renewal_payment_lock( $order ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return false;
+		}
+
+		$order_id  = $order->get_id();
+		$lock_key  = '_peach_renewal_payment_lock';
+		$lock_time = get_post_meta( $order_id, $lock_key, true );
+
+		if ( ! empty( $lock_time ) ) {
+			$lock_age = time() - absint( $lock_time );
+			if ( $lock_age < 300 ) {
+				return false;
+			}
+
+			delete_post_meta( $order_id, $lock_key );
+		}
+
+		return (bool) add_post_meta( $order_id, $lock_key, time(), true );
+	}
+
+	/**
+	 * Release the short-lived renewal order charge lock.
+	 *
+	 * @param WC_Order $order Renewal order object.
+	 * @return void
+	 */
+	protected static function release_renewal_payment_lock( $order ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		delete_post_meta( $order->get_id(), '_peach_renewal_payment_lock' );
+	}
+
+	/**
+	 * Acquire short-lived subscription-level locks to prevent concurrent duplicate renewal charges.
+	 *
+	 * @param WC_Order $order Renewal order object.
+	 * @return bool
+	 */
+	protected static function acquire_subscription_renewal_charge_locks( $order ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return false;
+		}
+
+		$subscriptions = self::get_subscriptions_for_order_context( $order );
+		if ( empty( $subscriptions ) ) {
+			return true;
+		}
+
+		$acquired_keys = [];
+
+		foreach ( $subscriptions as $subscription ) {
+			if ( ! is_object( $subscription ) || ! method_exists( $subscription, 'get_id' ) ) {
+				continue;
+			}
+
+			$subscription_id = absint( $subscription->get_id() );
+			if ( ! $subscription_id ) {
+				continue;
+			}
+
+			$option_key = 'pp_peach_renewal_charge_lock_' . $subscription_id;
+			$lock_value = get_option( $option_key, '' );
+
+			if ( '' !== $lock_value ) {
+				$parts     = explode( '|', (string) $lock_value );
+				$lock_time = isset( $parts[0] ) ? absint( $parts[0] ) : 0;
+
+				if ( $lock_time && ( time() - $lock_time ) < 300 ) {
+					self::release_subscription_renewal_charge_locks_by_keys( $acquired_keys );
+					return false;
+				}
+
+				delete_option( $option_key );
+			}
+
+			if ( ! add_option( $option_key, time() . '|' . $order->get_id(), '', 'no' ) ) {
+				self::release_subscription_renewal_charge_locks_by_keys( $acquired_keys );
+				return false;
+			}
+
+			$acquired_keys[] = $option_key;
+		}
+
+		if ( ! empty( $acquired_keys ) ) {
+			$order->update_meta_data( '_peach_renewal_charge_lock_keys', $acquired_keys );
+			$order->save();
+		}
+
+		return true;
+	}
+
+	/**
+	 * Release subscription-level renewal charge locks stored on an order.
+	 *
+	 * @param WC_Order $order Renewal order object.
+	 * @return void
+	 */
+	protected static function release_subscription_renewal_charge_locks( $order ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$lock_keys = $order->get_meta( '_peach_renewal_charge_lock_keys', true );
+		if ( ! is_array( $lock_keys ) ) {
+			$lock_keys = [];
+		}
+
+		self::release_subscription_renewal_charge_locks_by_keys( $lock_keys );
+		$order->delete_meta_data( '_peach_renewal_charge_lock_keys' );
+		$order->save();
+	}
+
+	/**
+	 * Release subscription-level renewal charge locks by option key.
+	 *
+	 * @param array $lock_keys Option keys.
+	 * @return void
+	 */
+	protected static function release_subscription_renewal_charge_locks_by_keys( array $lock_keys ) {
+		foreach ( $lock_keys as $lock_key ) {
+			$lock_key = sanitize_key( (string) $lock_key );
+			if ( '' !== $lock_key ) {
+				delete_option( $lock_key );
+			}
+		}
+	}
+
+	/**
+	 * Mark a successful Peach renewal charge before order-status handling runs.
+	 *
+	 * @param WC_Order $order          Renewal order object.
+	 * @param string   $transaction_id Peach transaction ID.
+	 * @param string   $source         Processing source.
+	 * @return void
+	 */
+	protected static function mark_renewal_payment_processed( $order, $transaction_id = '', $source = '' ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$order->update_meta_data( '_peach_renewal_payment_processed', time() );
+
+		$transaction_id = trim( (string) $transaction_id );
+		if ( '' !== $transaction_id ) {
+			$order->update_meta_data( '_peach_renewal_payment_processed_txn', $transaction_id );
+		}
+
+		$source = trim( (string) $source );
+		if ( '' !== $source ) {
+			$order->update_meta_data( '_peach_renewal_payment_processed_source', $source );
+		}
+
+		$order->save();
+	}
+
+	/**
+	 * Find a recently paid/processed Peach renewal order for the same subscription.
+	 *
+	 * This prevents multiple duplicate renewal orders created in the same short period from
+	 * each sending a separate saved-card charge to Peach.
+	 *
+	 * @param WC_Order $order            Current renewal order.
+	 * @param float    $amount_to_charge Amount being charged.
+	 * @return int Matching renewal order ID, or 0 when no duplicate is found.
+	 */
+	protected static function find_recent_successful_renewal_for_subscription( $order, $amount_to_charge ) {
+		if ( ! is_a( $order, 'WC_Order' ) || ! function_exists( 'wcs_order_contains_renewal' ) || ! wcs_order_contains_renewal( $order ) ) {
+			return 0;
+		}
+
+		$subscriptions = self::get_subscriptions_for_order_context( $order );
+		if ( empty( $subscriptions ) ) {
+			return 0;
+		}
+
+		$current_order_id = $order->get_id();
+		$current_currency = $order->get_currency();
+		$current_total    = (float) $amount_to_charge;
+		$current_created  = $order->get_date_created();
+		$current_time     = $current_created ? $current_created->getTimestamp() : time();
+		$window_seconds   = 6 * HOUR_IN_SECONDS;
+
+		foreach ( $subscriptions as $subscription ) {
+			if ( ! self::is_peach_subscription( $subscription ) ) {
+				continue;
+			}
+
+			foreach ( self::get_related_renewal_order_ids( $subscription ) as $related_order_id ) {
+				if ( $related_order_id === $current_order_id ) {
+					continue;
+				}
+
+				$related_order = wc_get_order( $related_order_id );
+				if ( ! is_a( $related_order, 'WC_Order' ) ) {
+					continue;
+				}
+
+				if ( 'peach-payments' !== $related_order->get_payment_method() ) {
+					continue;
+				}
+
+				if ( ! self::renewal_payment_already_processed( $related_order ) ) {
+					continue;
+				}
+
+				if ( $current_currency !== $related_order->get_currency() ) {
+					continue;
+				}
+
+				if ( abs( (float) $related_order->get_total() - $current_total ) > 0.01 ) {
+					continue;
+				}
+
+				$related_created = $related_order->get_date_created();
+				$related_time    = $related_created ? $related_created->getTimestamp() : 0;
+
+				if ( ! $related_time || abs( $current_time - $related_time ) > $window_seconds ) {
+					continue;
+				}
+
+				return $related_order_id;
+			}
+		}
+
+		return 0;
+	}
+
+	/**
+	 * Place an uncharged duplicate renewal order on hold and record why it was not charged.
+	 *
+	 * @param WC_Order $order              Duplicate renewal order.
+	 * @param int      $duplicate_order_id Existing successful renewal order ID.
+	 * @return void
+	 */
+	protected static function hold_duplicate_renewal_order( $order, $duplicate_order_id ) {
+		if ( ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$message = sprintf(
+			'Peach Payments duplicate protection: renewal charge skipped because renewal order #%d was already successfully processed for this subscription in the duplicate-protection window.',
+			absint( $duplicate_order_id )
+		);
+
+		$order->update_meta_data( '_peach_renewal_payment_skipped_duplicate_of', absint( $duplicate_order_id ) );
+		self::add_unique_order_note( $order, $message );
+
+		if ( ! $order->is_paid() && in_array( $order->get_status(), [ 'pending', 'failed' ], true ) ) {
+			$order->update_status( 'on-hold', $message );
+		} else {
+			$order->save();
+		}
+
+		PP_Gateway_Logger::warning( sprintf( 'Peach Payments renewal charge skipped for order #%1$d because renewal order #%2$d already appears processed for the same subscription/amount within the duplicate-protection window.', $order->get_id(), absint( $duplicate_order_id ) ) );
 	}
 
 	/**
@@ -556,14 +991,6 @@ class PP_Gateway_Subscription_Handler {
 			self::cleanup_redundant_payment_method_change_notes( $subscription );
 		}
 
-		PP_Gateway_Logger::info(
-			sprintf(
-				'Updated Peach recurring payment meta after failed renewal recovery. Original order #%1$d, renewal order #%2$d, registration ID %3$s.',
-				$original_order->get_id(),
-				$renewal_order->get_id(),
-				self::mask_meta_value( $meta_to_sync['payment_registration_id'] )
-			)
-		);
 	}
 
 	/**
@@ -625,15 +1052,6 @@ class PP_Gateway_Subscription_Handler {
 			);
 		}
 
-		PP_Gateway_Logger::info(
-			sprintf(
-				'Synced Peach recurring payment meta from order #%1$d to %2$d related subscription(s) via %3$s. Registration ID %4$s.',
-				$order->get_id(),
-				count( $subscriptions ),
-				$context_label,
-				$masked_registration_id
-			)
-		);
 	}
 
 	/**
@@ -680,14 +1098,6 @@ class PP_Gateway_Subscription_Handler {
 		self::add_unique_order_note( $subscription, $note );
 		self::add_unique_order_note( $parent_order, $note );
 
-		PP_Gateway_Logger::info(
-			sprintf(
-				'Backfilled Peach recurring payment meta from parent order #%1$d to subscription #%2$d. Registration ID %3$s.',
-				$parent_order->get_id(),
-				$subscription->get_id(),
-				self::mask_meta_value( $meta_to_sync['payment_registration_id'] )
-			)
-		);
 
 		return true;
 	}

@@ -5,9 +5,10 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/" target="_blank" rel="noopener noreferrer">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 4.0.2
+ * Version: 4.0.3
  * Requires at least: 6.8
- * Tested up to: 6.8
+ * Tested up to: 7.0
+ * Requires PHP: 7.4
  * Text Domain: woocommerce-gateway-peach-payments
  */
 
@@ -195,7 +196,7 @@ add_action( 'update_option_woocommerce_peach-payments_secret', 'pp_recheck_legac
 
 function pp_check_required_fields_on_update() {
 	
-	$options = get_option( 'woocommerce_peach-payments_settings');
+	$options = (array) get_option( 'woocommerce_peach-payments_settings', [] );
 
 	$required_keys = [
 		'embed_clientid',
@@ -209,7 +210,7 @@ function pp_check_required_fields_on_update() {
 	$missing = false;
 
 	foreach ( $required_keys as $key ) {
-		$value = $options[$key];
+		$value = $options[ $key ] ?? '';
 		if ( empty( $value ) ) {
 			$missing = true;
 			break;
