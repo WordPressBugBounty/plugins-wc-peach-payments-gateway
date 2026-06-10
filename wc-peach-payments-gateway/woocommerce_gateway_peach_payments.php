@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/" target="_blank" rel="noopener noreferrer">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 4.0.3
+ * Version: 4.0.4
  * Requires at least: 6.8
  * Tested up to: 7.0
  * Requires PHP: 7.4

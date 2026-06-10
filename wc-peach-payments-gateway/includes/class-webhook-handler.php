@@ -867,15 +867,7 @@ class PP_Gateway_Webhook_Handler {
 	 * @return bool
 	 */
 	private static function is_non_final_webhook_result_code( $result_code ) {
-		$result_code = trim( (string) $result_code );
-
-		return in_array(
-			$result_code,
-			[
-				'000.200.100', // Checkout successfully created; payment has not completed yet.
-			],
-			true
-		);
+		return PP_Gateway_Order_Utils::is_non_final_result_code( $result_code );
 	}
 
 	/**

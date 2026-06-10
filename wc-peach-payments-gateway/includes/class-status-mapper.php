@@ -22,9 +22,20 @@ class PP_Gateway_Status_Mapper {
 	}
 
 	/**
-	 * Returns the final status to set based on result code.
+	 * Determines if a Peach result code is informational/non-final.
+	 */
+	public static function is_non_final( $code ) {
+		return PP_Gateway_Order_Utils::is_non_final_result_code( $code );
+	}
+
+	/**
+	 * Returns the status to set based on result code.
 	 */
 	public static function get_order_status( $result_code ) {
-		return self::is_success( $result_code ) ? self::get_success_status() : 'failed';
+		if ( self::is_success( $result_code ) ) {
+			return self::get_success_status();
+		}
+
+		return self::is_non_final( $result_code ) ? 'on-hold' : 'failed';
 	}
 }

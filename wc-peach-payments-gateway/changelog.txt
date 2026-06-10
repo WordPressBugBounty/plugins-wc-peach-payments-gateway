@@ -1,3 +1,6 @@
+2026.06.10 - Version 4.0.4
+  * Fix - Redirection to thank you page for alternative payments
+
 2026.06.02 - Version 4.0.3
   * Enhancement - Added signature validation for webhooks
   * Fix - Prevent Expired webhook from updating order status

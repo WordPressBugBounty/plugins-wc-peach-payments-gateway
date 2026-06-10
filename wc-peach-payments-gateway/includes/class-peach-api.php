@@ -67,7 +67,9 @@ class PP_Peach_API {
 
 		$decoded = json_decode( $response, true );
 		
-		if($decoded['result']['code'] == $success_code || $decoded['result']['code'] == '000.200.100'){
+		$result_code = isset( $decoded['result']['code'] ) ? (string) $decoded['result']['code'] : '';
+
+		if ( $result_code === $success_code || PP_Gateway_Order_Utils::is_non_final_result_code( $result_code ) ) {
 			return $decoded;
 		}else{
 			PP_Gateway_Logger::error( "Request to Peach API. ".print_r($decoded, true) );

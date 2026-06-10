@@ -387,13 +387,6 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['paymentId'] ) );
 		}
 
-		if ( '' === $resource_path && '' === $posted_transaction_id ) {
-			PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order_id . ' did not include a resourcePath or transaction ID. Public POST result data was not trusted and the order was left unchanged.' );
-			wc_add_notice( __( 'We could not verify your Peach Payments transaction yet. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_safe_redirect( $order->get_checkout_payment_url() );
-			exit;
-		}
-
 		$returned_order_key = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
 		if ( '' !== $returned_order_key && ! hash_equals( (string) $order->get_order_key(), (string) $returned_order_key ) ) {
 			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': order key mismatch.' );
@@ -408,6 +401,15 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		if ( '' !== $stored_return_token && ! hash_equals( $stored_return_token, (string) $returned_token ) ) {
 			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': return token mismatch.' );
 			wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			wp_safe_redirect( $order->get_checkout_payment_url() );
+			exit;
+		}
+
+		$this->redirect_paid_or_processed_order_to_thank_you( $order, 'order was already paid before hosted return verification completed' );
+
+		if ( '' === $resource_path && '' === $posted_transaction_id ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order_id . ' did not include a resourcePath or transaction ID. Public POST result data was not trusted and the order was left unchanged.' );
+			wc_add_notice( __( 'We could not verify your Peach Payments transaction yet. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 			wp_safe_redirect( $order->get_checkout_payment_url() );
 			exit;
 		}
@@ -427,6 +429,8 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			$result = PP_Peach_API::get_payment_result_from_transaction_id( $posted_transaction_id );
 		}
 		if ( is_wp_error( $result ) ) {
+			$this->redirect_paid_or_processed_order_to_thank_you( $order, 'hosted return verification failed after the order had already been paid: ' . $result->get_error_message() );
+
 			PP_Gateway_Logger::error( 'Peach hosted return verification failed for order #' . $order_id . ': ' . $result->get_error_message() );
 			wc_add_notice( __( 'Payment verification failed. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 			wp_safe_redirect( $order->get_checkout_payment_url() );
@@ -436,6 +440,8 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 
 		$validation = PP_Peach_API::validate_payment_result_for_order( $order, $result, 'hosted_return' );
 		if ( is_wp_error( $validation ) ) {
+			$this->redirect_paid_or_processed_order_to_thank_you( $order, 'hosted return validation failed after the order had already been paid: ' . $validation->get_error_message() );
+
 			PP_Gateway_Logger::error( 'Peach hosted return rejected for order #' . $order_id . ': ' . $validation->get_error_message() . ' Response: ' . print_r( $result, true ) );
 			$order->add_order_note( 'Peach payment return rejected: ' . $validation->get_error_message() );
 			$order->save();
@@ -446,7 +452,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 
 		$code = isset( $result['result']['code'] ) ? sanitize_text_field( (string) $result['result']['code'] ) : '';
 
-		if ( 0 === strpos( $code, '000.200.' ) ) {
+		if ( PP_Gateway_Order_Utils::is_non_final_result_code( $code ) ) {
 			$order->update_status( 'on-hold', __( 'Payment pending via Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
 			$order->delete_meta_data( '_peach_return_token' );
 			$order->save();
@@ -458,7 +464,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		$order->delete_meta_data( '_peach_return_token' );
 		$order->save();
 
-		if ( PP_Gateway_Order_Utils::is_successful_result_code( $code ) || $order->is_paid() ) {
+		if ( PP_Gateway_Order_Utils::is_successful_result_code( $code ) || $order->is_paid() || PP_Gateway_Order_Utils::initial_payment_already_processed( $order ) ) {
 			wp_safe_redirect( $this->get_return_url( $order ) );
 			exit;
 		}
@@ -468,7 +474,42 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		exit;
 	}
 
-	
+	/**
+	 * Redirect a validated Peach hosted return to the thank-you page when the
+	 * WooCommerce order has already been finalised by another trusted flow, such
+	 * as the Peach webhook.
+	 *
+	 * This prevents the customer being sent back to the pay-for-order screen for
+	 * an order that has already moved to Processing/Completed or has already been
+	 * marked as processed by the gateway.
+	 *
+	 * @param WC_Order $order WooCommerce order.
+	 * @param string   $reason Internal log reason.
+	 * @return void
+	 */
+	private function redirect_paid_or_processed_order_to_thank_you( WC_Order $order, $reason = '' ) {
+		$latest_order = wc_get_order( $order->get_id() );
+
+		if ( $latest_order && is_a( $latest_order, 'WC_Order' ) ) {
+			$order = $latest_order;
+		}
+
+		if ( ! $order->is_paid() && ! PP_Gateway_Order_Utils::initial_payment_already_processed( $order ) ) {
+			return;
+		}
+
+		$order->delete_meta_data( '_peach_return_token' );
+		$order->save();
+
+		$log_reason = rtrim( trim( (string) $reason ), '.' );
+		if ( '' !== $log_reason ) {
+			PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order->get_id() . ' redirected to the thank-you page because ' . $log_reason . '.' );
+		}
+
+		wp_safe_redirect( $this->get_return_url( $order ) );
+		exit;
+	}
+
 	/**
 	 * Check if the gateway is in test mode.
 	 *

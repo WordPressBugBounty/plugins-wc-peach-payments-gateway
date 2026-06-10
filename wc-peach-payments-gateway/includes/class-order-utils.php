@@ -312,6 +312,13 @@ class PP_Gateway_Order_Utils {
 		}
 	
 		$status_code     = sanitize_text_field( (string) $response['result']['code'] );
+
+		if ( self::is_non_final_result_code( $status_code ) ) {
+			PP_Gateway_Logger::info( 'Peach recurring payment response for order #' . $order->get_id() . ' returned non-final result code ' . $status_code . '. Order left unchanged.' );
+			$order->save();
+			return;
+		}
+
 		$transaction_id  = isset( $response['id'] ) ? sanitize_text_field( $response['id'] ) : '';
 		$registration_id = isset( $response['registrationId'] ) ? sanitize_text_field( $response['registrationId'] ) : '';
 	
@@ -437,6 +444,13 @@ class PP_Gateway_Order_Utils {
 		}
 
 		$status_code     = sanitize_text_field( (string) $response['result_code'] );
+
+		if ( self::is_non_final_result_code( $status_code ) ) {
+			PP_Gateway_Logger::info( 'Peach payment response for order #' . $order->get_id() . ' returned non-final result code ' . $status_code . '. Order left unchanged.' );
+			$order->save();
+			return;
+		}
+
 		$transaction_id  = isset( $response['id'] ) ? sanitize_text_field( $response['id'] ) : '';
 		$registration_id = isset( $response['registrationId'] ) ? sanitize_text_field( $response['registrationId'] ) : '';
 
@@ -559,6 +573,21 @@ class PP_Gateway_Order_Utils {
 	 */
 	public static function is_successful_result_code( $code ) {
 		return preg_match( '/^(000\.000\.|000\.100\.1|000\.[36])/', $code );
+	}
+
+	/**
+	 * Determines whether a Peach result code is informational/non-final.
+	 *
+	 * Peach can send 000.200.* codes while a checkout/payment session is still
+	 * pending. These are not final failures and must not move an order to failed.
+	 *
+	 * @param string $code Peach result code.
+	 * @return bool
+	 */
+	public static function is_non_final_result_code( $code ) {
+		$code = trim( (string) $code );
+
+		return '' !== $code && 0 === strpos( $code, '000.200.' );
 	}
 	
 	/**
