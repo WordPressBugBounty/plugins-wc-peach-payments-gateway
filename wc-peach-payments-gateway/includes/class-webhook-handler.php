@@ -920,15 +920,7 @@ class PP_Gateway_Webhook_Handler {
 		}
 		
 		$order_number = PP_Gateway_Order_Utils::order_number_prep( $merchantTransactionId, true );
-		
-		$meta = PP_Gateway_Order_Utils::find_sequential_plugins();
-		
-		$order_id = $order_number;
-		if($meta){
-			$order_id = self::get_order_id_by_order_number( $order_number, $meta );
-		}
-		
-		$order = wc_get_order( $order_id );
+		$order        = PP_Gateway_Order_Utils::find_order_by_number( $merchantTransactionId );
 		
 		//PP_Peach_API::log_error( 'API Webhook Order', '', $order, '' );
 
@@ -1045,24 +1037,8 @@ class PP_Gateway_Webhook_Handler {
 	}
 	
 	public static function get_order_id_by_order_number( $order_number, $meta ) {
-		if ( ! $order_number ) {
-			return false;
-		}
-	
-		$query = new WP_Query( [
-			'post_type'  => 'shop_order',
-			'post_status'=> 'any',
-			'meta_query' => [
-				[
-					'key'   => $meta,
-					'value' => $order_number,
-				]
-			],
-			'fields'     => 'ids',
-			'posts_per_page' => 1,
-		] );
-	
-		return ! empty( $query->posts ) ? $query->posts[0] : false;
+		$order = PP_Gateway_Order_Utils::find_order_by_number( $order_number );
+		return $order && is_a( $order, 'WC_Order' ) ? $order->get_id() : false;
 	}
 	
 	public static function decode_data( $data, $handler_name = 'decode_data', $require_payload_signature = true ){

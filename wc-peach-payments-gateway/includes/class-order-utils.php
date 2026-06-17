@@ -17,63 +17,137 @@ class PP_Gateway_Order_Utils {
 	 */
 	public static function find_converted_number( $order_identifier, $sequential_needed = false ) {
 		$order_id = $order_identifier;
-		$convert = PP_Gateway_Settings::get( 'orderids' ) === 'yes';
+		$convert  = PP_Gateway_Settings::get( 'orderids' ) === 'yes';
+
+		/**
+		 * Conversion not needed, or gateway setting explicitly says the raw
+		 * WooCommerce order ID must be used.
+		 */
+		if ( ! $sequential_needed || $convert ) {
+			return $order_id;
+		}
+
+		/**
+		 * Prefer WooCommerce's public order-number API. Sequential-number plugins
+		 * such as WebToffee hook into get_order_number(), and this is also safer
+		 * for HPOS than reading post meta directly.
+		 */
+		if ( function_exists( 'wc_get_order' ) ) {
+			$order = wc_get_order( $order_identifier );
+
+			if ( $order && method_exists( $order, 'get_order_number' ) ) {
+				$order_number = trim( (string) $order->get_order_number() );
+
+				if ( '' !== $order_number ) {
+					return $order_number;
+				}
+			}
+		}
+
+		/**
+		 * Backwards-compatible fallback for older sequential-number plugins that
+		 * stored the generated number directly in known order meta keys.
+		 */
 		$meta = self::find_sequential_plugins();
-		
-		/**
-		 * Sequential plugins not found
-		*/
-		if(!$meta){
-			return $order_id;
+		if ( $meta ) {
+			$converted = self::convertSequentialNumber( $order_identifier, $meta );
+
+			if ( '' !== trim( (string) $converted ) ) {
+				return $converted;
+			}
 		}
-		
-		/**
-		 * Conversion not needed
-		 * WC ID Sent and must use
-		*/
-		if(!$sequential_needed){
-			return $order_id;
-		}
-		
-		/**
-		 * Settings: Must Use WC
-		*/
-		if($convert){
-			return $order_id;
-		}
-		
-		return self::convertSequentialNumber($order_identifier, $meta);
+
+		return $order_id;
 	}
 
 	/**
-	 * Find an order by WooCommerce order ID or sequential order number.
+	 * Find an order by WooCommerce order ID, Peach merchant reference, or sequential order number.
 	 *
-	 * @param string $order_identifier Order number (string) or ID.
+	 * @param string $order_identifier Order number, Peach merchantTransactionId, or ID.
 	 * @return WC_Order|false
 	 */
-	public static function find_order_by_number( $order_identifier) {
-		PP_Peach_API::log_error( 'Order Generation Needed', '', '', $order_identifier );
-		return false;
+	public static function find_order_by_number( $order_identifier ) {
+		$order_identifier = trim( (string) $order_identifier );
 
-		// If using default WooCommerce order IDs
-		if ( $use_default_ids && is_numeric( $order_identifier ) ) {
-			return wc_get_order( (int) $order_identifier );
+		if ( '' === $order_identifier || ! function_exists( 'wc_get_order' ) ) {
+			return false;
 		}
 
-		// Otherwise search for _order_number post meta
-		$args = [
-			'limit'        => 1,
-			'return'       => 'objects',
-			'orderby'      => 'date',
-			'order'        => 'DESC',
-			'meta_key'     => '_order_number',
-			'meta_value'   => $order_identifier,
-			'meta_compare' => '=',
+		$candidates = [ $order_identifier ];
+		$normalised = self::order_number_prep( $order_identifier, true );
+		if ( '' !== $normalised && $normalised !== $order_identifier ) {
+			$candidates[] = $normalised;
+		}
+
+		$meta_keys = [
+			'_peach_expected_merchant_transaction_id',
+			'_order_number',
+			'_order_number_formatted',
+			'_alg_wc_full_custom_order_number',
 		];
 
-		$orders = wc_get_orders( $args );
+		$plugin_meta_key = self::find_sequential_plugins();
+		if ( $plugin_meta_key ) {
+			array_unshift( $meta_keys, $plugin_meta_key );
+		}
 
-		return ! empty( $orders ) ? $orders[0] : wc_get_order( $order_identifier );
+		if ( function_exists( 'wc_get_orders' ) ) {
+			foreach ( array_unique( $meta_keys ) as $meta_key ) {
+				foreach ( array_unique( $candidates ) as $candidate ) {
+					$orders = wc_get_orders( [
+						'limit'        => 1,
+						'return'       => 'objects',
+						'orderby'      => 'date',
+						'order'        => 'DESC',
+						'meta_key'     => $meta_key,
+						'meta_value'   => $candidate,
+						'meta_compare' => '=',
+					] );
+
+					if ( ! empty( $orders ) && is_a( $orders[0], 'WC_Order' ) ) {
+						return $orders[0];
+					}
+				}
+			}
+
+			// Raw WooCommerce order IDs may arrive zero-padded from Peach. Try this
+			// only after stored Peach/sequential references, to avoid mistaking a
+			// numeric sequential order number for a different raw WooCommerce ID.
+			foreach ( array_unique( $candidates ) as $candidate ) {
+				if ( ctype_digit( (string) $candidate ) ) {
+					$order_id = absint( ltrim( (string) $candidate, '0' ) );
+					if ( $order_id > 0 ) {
+						$order = wc_get_order( $order_id );
+						if ( $order && is_a( $order, 'WC_Order' ) ) {
+							return $order;
+						}
+					}
+				}
+			}
+
+			// Final compatibility fallback for plugins that calculate the order number
+			// dynamically via WC_Order::get_order_number() instead of storing known meta.
+			$recent_orders = wc_get_orders( [
+				'limit'          => 100,
+				'return'         => 'objects',
+				'orderby'        => 'date',
+				'order'          => 'DESC',
+				'payment_method' => 'peach-payments',
+			] );
+
+			foreach ( $recent_orders as $order ) {
+				if ( ! is_a( $order, 'WC_Order' ) || ! method_exists( $order, 'get_order_number' ) ) {
+					continue;
+				}
+
+				$order_number = trim( (string) $order->get_order_number() );
+				if ( in_array( $order_number, $candidates, true ) ) {
+					return $order;
+				}
+			}
+		}
+
+		return false;
 	}
 	
 	/**
@@ -84,8 +158,17 @@ class PP_Gateway_Order_Utils {
 	 * @return $order_number
 	 */
 	public static function order_number_prep( $order_number, $reversed = false ) {
-		if($reversed){
-			return ltrim($order_number, '0');
+		$order_number = (string) $order_number;
+
+		if ( $reversed ) {
+			// Only strip Peach's left-zero padding from plain numeric WooCommerce IDs.
+			// Custom/sequential references such as 000P9007 or PEACH00002231 must stay intact.
+			if ( ctype_digit( $order_number ) ) {
+				$trimmed = ltrim( $order_number, '0' );
+				return '' === $trimmed ? $order_number : $trimmed;
+			}
+
+			return $order_number;
 		}
 		
 		if (strlen($order_number) < 8) {

@@ -524,6 +524,19 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	 *
 	 */
 	public static function custom_cart_validation_blocks($order){
+		if ( ! $order || ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		if ( $order->get_payment_method() !== 'peach-payments' ) {
+			return;
+		}
+
+		$order_total = (float) $order->get_total();
+		if ( $order_total <= 0 ) {
+			return;
+		}
+
 		$phone = (string) $order->get_billing_phone();
 		
 		$has_subscription = false;
@@ -592,12 +605,17 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		}
 		
 		//Ensure Cart Total is greater that 1
-		$order_total = (float) $order->get_total();
 		if ( $order_total < 1 ) {
 			if ( class_exists( '\Automattic\WooCommerce\StoreApi\Exceptions\RouteException' ) ) {
+				$message = sprintf(
+					__( 'Your current cart total is %1$s — you must have a cart total of at least %2$s to place your order.', WC_PEACH_TEXT_DOMAIN ),
+					wp_strip_all_tags( wc_price( $order_total, [ 'currency' => $order->get_currency() ] ) ),
+					wp_strip_all_tags( wc_price( 1, [ 'currency' => $order->get_currency() ] ) )
+				);
+
 				throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
 					'cart_total_too_low',
-					__( 'Your current cart total is %1$s — you must have a cart total of at least %2$s to place your order.', WC_PEACH_TEXT_DOMAIN ),
+					$message,
 					400
 				);
 			}
@@ -613,8 +631,14 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		if ( ! isset( $_POST['payment_method'] ) || $_POST['payment_method'] !== 'peach-payments' ) {
 			return;
 		}
-	
+
 		$cart = WC()->cart;
+		$cart_total = $cart ? (float) $cart->get_total( 'edit' ) : 0;
+
+		if ( $cart_total <= 0 ) {
+			return;
+		}
+	
 		$has_subscription = false;
 		$has_non_subscription = false;
 	
@@ -659,13 +683,13 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		//Ensure Cart Total is greater that 1
 		$minimum = 1; // Set your minimum subtotal here
 	
-		if ( WC()->cart && WC()->cart->get_subtotal() < $minimum ) {
+		if ( $cart_total < $minimum ) {
 			$message = sprintf(
 				esc_html__(
 					'Your current cart total is %1$s — you must have a cart total of at least %2$s to place your order.',
 					WC_PEACH_TEXT_DOMAIN
 				),
-				wc_price( WC()->cart->get_subtotal() ),
+				wc_price( $cart_total ),
 				wc_price( $minimum )
 			);
 	
