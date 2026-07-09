@@ -371,21 +371,33 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			exit;
 		}
 
+		$clean_get_payload  = is_array( $_GET ) ? wc_clean( wp_unslash( $_GET ) ) : [];
+		$clean_post_payload = is_array( $_POST ) ? wc_clean( wp_unslash( $_POST ) ) : [];
+		$return_payload     = array_merge( $clean_get_payload, $clean_post_payload );
+
 		$resource_path = '';
-		if ( isset( $_GET['resourcePath'] ) ) {
-			$resource_path = sanitize_text_field( wp_unslash( $_GET['resourcePath'] ) );
-		} elseif ( isset( $_POST['resourcePath'] ) ) {
-			$resource_path = sanitize_text_field( wp_unslash( $_POST['resourcePath'] ) );
+		if ( ! empty( $return_payload['resourcePath'] ) ) {
+			$resource_path = sanitize_text_field( (string) $return_payload['resourcePath'] );
 		}
 
 		$posted_transaction_id = '';
-		if ( isset( $_POST['id'] ) ) {
-			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['id'] ) );
-		} elseif ( isset( $_POST['payment_id'] ) ) {
-			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['payment_id'] ) );
-		} elseif ( isset( $_POST['paymentId'] ) ) {
-			$posted_transaction_id = sanitize_text_field( wp_unslash( $_POST['paymentId'] ) );
+		foreach ( [ 'id', 'payment_id', 'paymentId' ] as $transaction_key ) {
+			if ( ! empty( $return_payload[ $transaction_key ] ) ) {
+				$posted_transaction_id = sanitize_text_field( (string) $return_payload[ $transaction_key ] );
+				break;
+			}
 		}
+
+		$posted_checkout_id = '';
+		foreach ( [ 'checkoutId', 'checkout_id' ] as $checkout_key ) {
+			if ( ! empty( $return_payload[ $checkout_key ] ) ) {
+				$posted_checkout_id = sanitize_text_field( (string) $return_payload[ $checkout_key ] );
+				break;
+			}
+		}
+
+		$raw_return_body       = (string) file_get_contents( 'php://input' );
+		$posted_return_payload = ! empty( $clean_post_payload ) ? $clean_post_payload : $return_payload;
 
 		$returned_order_key = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
 		if ( '' !== $returned_order_key && ! hash_equals( (string) $order->get_order_key(), (string) $returned_order_key ) ) {
@@ -407,8 +419,8 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 
 		$this->redirect_paid_or_processed_order_to_thank_you( $order, 'order was already paid before hosted return verification completed' );
 
-		if ( '' === $resource_path && '' === $posted_transaction_id ) {
-			PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order_id . ' did not include a resourcePath or transaction ID. Public POST result data was not trusted and the order was left unchanged.' );
+		if ( '' === $resource_path && '' === $posted_checkout_id && '' === $posted_transaction_id ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order_id . ' did not include a resourcePath, checkoutId or transaction ID. Public POST result data was not trusted and the order was left unchanged.' );
 			wc_add_notice( __( 'We could not verify your Peach Payments transaction yet. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 			wp_safe_redirect( $order->get_checkout_payment_url() );
 			exit;
@@ -424,14 +436,47 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			}
 
 			$result = PP_Peach_API::get_payment_result_from_resource_path( $resource_path );
+		} elseif ( '' !== $posted_checkout_id ) {
+			PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order_id . ' did not include resourcePath and is validating the Checkout V2 return signature before using fallback verification.' );
+
+			$checkout_check = PP_Peach_API::validate_checkout_id_for_order( $order, $posted_checkout_id );
+			if ( is_wp_error( $checkout_check ) ) {
+				PP_Gateway_Logger::error( 'Peach hosted return Checkout V2 verification rejected for order #' . $order_id . ': ' . $checkout_check->get_error_message() . ' Return payload: ' . print_r( $posted_return_payload, true ) );
+				wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+				wp_safe_redirect( $order->get_checkout_payment_url() );
+				exit;
+			}
+
+			$allow_transaction_id_fallback = true;
+			$signature_check               = PP_Peach_API::verify_hosted_return_payload_signature( $posted_return_payload, $raw_return_body, $order_id );
+
+			if ( ! is_wp_error( $signature_check ) ) {
+				PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order_id . ' passed signature validation. Using the signed return payload as the verified payment result without calling Checkout V2 status.' );
+				$result                        = PP_Peach_API::normalise_signed_hosted_return_result_for_order( $order, $posted_return_payload );
+				$allow_transaction_id_fallback = false;
+			} else {
+				PP_Gateway_Logger::warning( 'Peach hosted return signature validation failed for order #' . $order_id . ' and is falling back to Checkout V2 status verification by checkoutId. Signature error: ' . $signature_check->get_error_message() );
+
+				$status_result = PP_Peach_API::get_checkout_status_from_checkout_id( $posted_checkout_id, $order_id, $posted_return_payload, $raw_return_body );
+				if ( is_wp_error( $status_result ) ) {
+					$result = $status_result;
+				} else {
+					$result = PP_Peach_API::normalise_checkout_v2_status_result_for_order( $order, $status_result, $posted_return_payload );
+				}
+			}
+
+			if ( $allow_transaction_id_fallback && is_wp_error( $result ) && '' !== $posted_transaction_id ) {
+				PP_Gateway_Logger::warning( 'Peach hosted return Checkout V2 fallback verification failed for order #' . $order_id . ' and is falling back to server-to-server transaction ID verification. Checkout error: ' . $result->get_error_message() . '. Transaction ID: ' . $posted_transaction_id );
+				$result = PP_Peach_API::get_payment_result_from_transaction_id( $posted_transaction_id );
+			}
 		} else {
-			PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order_id . ' used a POST transaction ID fallback. Posted payment result fields were ignored and the transaction was verified server-to-server.' );
+			PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order_id . ' used the legacy POST transaction ID fallback. Posted payment result fields were ignored and the transaction was verified server-to-server.' );
 			$result = PP_Peach_API::get_payment_result_from_transaction_id( $posted_transaction_id );
 		}
 		if ( is_wp_error( $result ) ) {
 			$this->redirect_paid_or_processed_order_to_thank_you( $order, 'hosted return verification failed after the order had already been paid: ' . $result->get_error_message() );
 
-			PP_Gateway_Logger::error( 'Peach hosted return verification failed for order #' . $order_id . ': ' . $result->get_error_message() );
+			PP_Gateway_Logger::error( 'Peach hosted return verification failed for order #' . $order_id . ': ' . $result->get_error_message() . ' Posted checkoutId: ' . $posted_checkout_id . '. Posted transaction ID: ' . $posted_transaction_id . '. Posted payload: ' . print_r( $posted_return_payload, true ) );
 			wc_add_notice( __( 'Payment verification failed. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 			wp_safe_redirect( $order->get_checkout_payment_url() );
 			exit;
@@ -463,6 +508,15 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		PP_Gateway_Order_Utils::handle_payment_status( $order, $result );
 		$order->delete_meta_data( '_peach_return_token' );
 		$order->save();
+
+		$latest_order = wc_get_order( $order->get_id() );
+		if ( $latest_order && is_a( $latest_order, 'WC_Order' ) ) {
+			$order = $latest_order;
+		}
+
+		if ( PP_Gateway_Order_Utils::is_successful_result_code( $code ) && ! $order->is_paid() && ! PP_Gateway_Order_Utils::initial_payment_already_processed( $order ) ) {
+			PP_Gateway_Logger::error( 'Peach hosted return for order #' . $order_id . ' verified a successful payment but the WooCommerce order was not marked as paid/processed. Current order status: ' . $order->get_status() . '. Result: ' . print_r( $result, true ) );
+		}
 
 		if ( PP_Gateway_Order_Utils::is_successful_result_code( $code ) || $order->is_paid() || PP_Gateway_Order_Utils::initial_payment_already_processed( $order ) ) {
 			wp_safe_redirect( $this->get_return_url( $order ) );

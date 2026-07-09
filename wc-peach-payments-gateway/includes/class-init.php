@@ -81,15 +81,9 @@ class WC_Peach_Gateway_Init {
 				$gateway->handle_peach_return();
 			}
 
-			// Do not process add-card state changes from raw public POST data.
-			// Verified add-card returns are handled by PP_Gateway_Token_Add_Handler::maybe_handle_resource_path().
-			if ( isset( $_GET['pp_add_card_return'] ) && ! isset( $_GET['resourcePath'] ) ) {
-				PP_Gateway_Logger::warning( 'Peach add-card return reached without resourcePath. Public POST data was not trusted and no card was saved.' );
-				$my_cards = wc_get_account_endpoint_url( 'my-cards' );
-				nocache_headers();
-				wp_safe_redirect( $my_cards, 303 );
-				exit;
-			}
+			// Add-card returns are handled by PP_Gateway_Token_Add_Handler::maybe_handle_resource_path().
+			// That handler verifies either the legacy resourcePath or the Checkout V2 checkoutId server-to-server
+			// before any saved-card data is written.
 		} );
 
 

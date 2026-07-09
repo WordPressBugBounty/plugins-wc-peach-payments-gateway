@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.8
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.0.5
-Version: 4.0.5
+Stable tag: 4.0.6
+Version: 4.0.6
 License: GPLv3
 
 
@@ -44,6 +44,9 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 4.0.6 =
+  * Fix - Apple Pay redirection to Thank you page
 
 = 4.0.5 =
   * Fix - Remove validation for cart total amount less 1 ZAR

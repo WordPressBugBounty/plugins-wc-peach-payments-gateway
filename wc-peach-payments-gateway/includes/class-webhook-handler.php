@@ -909,14 +909,26 @@ class PP_Gateway_Webhook_Handler {
 			]
 		);
 
-		if ( empty( $merchantTransactionId ) || empty( $result_code ) ) {
+		if ( empty( $merchantTransactionId ) ) {
 			return ['log_type' => 'error', 'log_msg' => 'invalid webhook payload', 'log_txt' => 'Invalid webhook payload'];
 		}
 
 		$merchantTransactionId = sanitize_text_field( $merchantTransactionId );
+		$normalised_merchant_transaction_id = strtolower( preg_replace( '/[^a-z0-9]/', '', $merchantTransactionId ) );
 		
-		if (strpos($merchantTransactionId, "peach-card") !== false) {
+		if ( 0 === strpos( $normalised_merchant_transaction_id, 'peachcard' ) ) {
+			if ( class_exists( 'PP_Gateway_Token_Add_Handler' ) && method_exists( 'PP_Gateway_Token_Add_Handler', 'handle_add_card_webhook' ) ) {
+				$card_webhook_result = PP_Gateway_Token_Add_Handler::handle_add_card_webhook( $data );
+				if ( is_wp_error( $card_webhook_result ) ) {
+					PP_Gateway_Logger::warning( 'Peach add-card webhook acknowledged but card was not saved for reference ' . $merchantTransactionId . ': ' . $card_webhook_result->get_error_message() );
+				}
+			}
+
 			return ['log_type' => 'info', 'log_msg' => 'peach-card', 'log_txt' => 'User adding card'];
+		}
+
+		if ( empty( $result_code ) ) {
+			return ['log_type' => 'error', 'log_msg' => 'invalid webhook payload', 'log_txt' => 'Invalid webhook payload'];
 		}
 		
 		$order_number = PP_Gateway_Order_Utils::order_number_prep( $merchantTransactionId, true );

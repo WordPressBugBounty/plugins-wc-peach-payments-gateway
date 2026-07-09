@@ -445,6 +445,798 @@ class PP_Peach_API {
 		return trim( $settings['access_token'] ?? '' );
 	}
 	
+
+	/**
+	 * Get the full base URL for the Peach Checkout V2 API.
+	 *
+	 * @return string Fully qualified Checkout base URL ending with a slash.
+	 */
+	public static function get_checkout_endpoint_url() {
+		$test_mode = 'INTEGRATOR_TEST' === PP_Gateway_Settings::get( 'transaction_mode' );
+
+		return $test_mode ? 'https://testsecure.peachpayments.com/' : 'https://secure.peachpayments.com/';
+	}
+
+
+	/**
+	 * Extract a Checkout V2 checkoutId from a Peach checkout-session response.
+	 *
+	 * Peach has returned both `id` and `checkoutId` shapes across hosted flows,
+	 * so keep this centralised and tolerant while still validating the value
+	 * before storing it against an order.
+	 *
+	 * @param array $response Peach checkout-session response.
+	 * @return string Sanitized checkout ID, or an empty string when unavailable.
+	 */
+	public static function get_checkout_id_from_session_response( array $response ) {
+		$candidate = self::get_first_response_value(
+			$response,
+			[
+				'checkoutId',
+				'checkout_id',
+				'id',
+				[ 'checkout', 'id' ],
+				[ 'checkout', 'checkoutId' ],
+				[ 'payload', 'checkoutId' ],
+				[ 'payload', 'checkout', 'id' ],
+			]
+		);
+
+		if ( '' !== (string) $candidate ) {
+			$checkout_id = self::normalise_checkout_id( $candidate );
+			if ( ! is_wp_error( $checkout_id ) ) {
+				return $checkout_id;
+			}
+		}
+
+		$redirect_url = ! empty( $response['redirectUrl'] ) ? (string) $response['redirectUrl'] : '';
+		if ( '' !== $redirect_url ) {
+			$parts = wp_parse_url( $redirect_url );
+
+			if ( ! empty( $parts['query'] ) ) {
+				$query_args = [];
+				parse_str( $parts['query'], $query_args );
+
+				foreach ( [ 'checkoutId', 'checkout_id', 'id' ] as $query_key ) {
+					if ( empty( $query_args[ $query_key ] ) ) {
+						continue;
+					}
+
+					$checkout_id = self::normalise_checkout_id( $query_args[ $query_key ] );
+					if ( ! is_wp_error( $checkout_id ) ) {
+						return $checkout_id;
+					}
+				}
+			}
+
+			if ( ! empty( $parts['path'] ) && preg_match( '#/checkout/([A-Za-z0-9.\-]+)#', $parts['path'], $matches ) ) {
+				$checkout_id = self::normalise_checkout_id( $matches[1] );
+				if ( ! is_wp_error( $checkout_id ) ) {
+					return $checkout_id;
+				}
+			}
+		}
+
+		return '';
+	}
+
+	/**
+	 * Sanitize a Checkout V2 checkoutId before using it in a server-to-server call.
+	 *
+	 * @param string $checkout_id Peach Checkout V2 checkout ID.
+	 * @return string|WP_Error
+	 */
+	private static function normalise_checkout_id( $checkout_id ) {
+		$checkout_id = trim( (string) wp_unslash( $checkout_id ) );
+		$checkout_id = sanitize_text_field( $checkout_id );
+
+		if ( '' === $checkout_id ) {
+			return new WP_Error( 'peach_missing_checkout_id', __( 'Missing Peach Payments checkout ID.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		if ( strlen( $checkout_id ) > 64 || ! preg_match( '/^[A-Za-z0-9.\-]+$/', $checkout_id ) ) {
+			return new WP_Error( 'peach_invalid_checkout_id', __( 'Invalid Peach Payments checkout ID.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		return $checkout_id;
+	}
+
+	/**
+	 * Validate that a Checkout V2 checkoutId belongs to the WooCommerce order.
+	 *
+	 * @param WC_Order $order       WooCommerce order.
+	 * @param string   $checkout_id Peach Checkout V2 checkout ID.
+	 * @return true|WP_Error
+	 */
+	public static function validate_checkout_id_for_order( WC_Order $order, $checkout_id ) {
+		$checkout_id = self::normalise_checkout_id( $checkout_id );
+		if ( is_wp_error( $checkout_id ) ) {
+			return $checkout_id;
+		}
+
+		$expected_checkout_id = trim( (string) $order->get_meta( '_peach_checkout_id', true ) );
+
+		if ( '' === $expected_checkout_id ) {
+			return new WP_Error( 'peach_missing_stored_checkout_id', __( 'The WooCommerce order is missing the Peach checkout ID needed for verification.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		if ( ! hash_equals( $expected_checkout_id, (string) $checkout_id ) ) {
+			return new WP_Error( 'peach_checkout_mismatch', __( 'Payment verification failed because the Peach checkout ID did not match the WooCommerce order.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		return true;
+	}
+
+	/**
+	 * Normalise a Peach payload signature value before comparison.
+	 *
+	 * @param string $signature Signature value.
+	 * @return string
+	 */
+	private static function normalise_hosted_return_signature( $signature ) {
+		$signature = trim( (string) $signature );
+		$signature = preg_replace( '/^sha256=/i', '', $signature );
+		return strtolower( trim( (string) $signature ) );
+	}
+
+	/**
+	 * Retrieve configured secrets that may validate Peach's payload-level Checkout
+	 * return signature field. This mirrors the webhook payload signature logic.
+	 *
+	 * @return array<string,string> Labelled non-empty secrets.
+	 */
+	private static function get_hosted_return_signature_secrets() {
+		$candidates = [
+			'Secret Token setting'  => PP_Gateway_Settings::get( 'secret' ),
+			'Client Secret setting' => PP_Gateway_Settings::get( 'embed_clientsecret' ),
+		];
+
+		$secrets = [];
+		foreach ( $candidates as $label => $secret ) {
+			$secret = is_string( $secret ) ? trim( $secret ) : '';
+			if ( '' === $secret ) {
+				continue;
+			}
+
+			if ( in_array( $secret, $secrets, true ) ) {
+				continue;
+			}
+
+			$secrets[ $label ] = $secret;
+		}
+
+		return $secrets;
+	}
+
+	/**
+	 * Flatten signature parameters into Peach's bracket notation for nested data.
+	 *
+	 * @param array  $input  Input data.
+	 * @param string $prefix Current key prefix.
+	 * @return array
+	 */
+	private static function flatten_hosted_return_signature_params( array $input, $prefix = '' ) {
+		$result = [];
+
+		foreach ( $input as $key => $value ) {
+			$current_key = '' === $prefix ? (string) $key : $prefix . '[' . (string) $key . ']';
+
+			if ( is_array( $value ) ) {
+				$result = array_merge( $result, self::flatten_hosted_return_signature_params( $value, $current_key ) );
+			} else {
+				$result[ $current_key ] = $value;
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Convert PHP-normalised form keys back to Peach's signature key format.
+	 *
+	 * @param string $key Flattened parameter key.
+	 * @return string
+	 */
+	private static function convert_hosted_return_signature_key( $key ) {
+		$key = (string) $key;
+
+		if ( false !== strpos( $key, '[' ) ) {
+			$prefix = substr( $key, 0, strpos( $key, '[' ) );
+			$suffix = substr( $key, strpos( $key, '[' ) );
+			return str_replace( '_', '.', $prefix ) . $suffix;
+		}
+
+		return str_replace( '_', '.', $key );
+	}
+
+	/**
+	 * Build Peach's concatenated signature string from flattened fields.
+	 *
+	 * @param array $fields Flattened signature fields.
+	 * @return string
+	 */
+	private static function build_hosted_return_signature_string( array $fields ) {
+		$prepared = [];
+
+		foreach ( $fields as $key => $value ) {
+			$key = (string) $key;
+
+			if ( 'signature' === $key ) {
+				continue;
+			}
+
+			if ( null === $value || false === $value ) {
+				$value = '';
+			}
+
+			$prepared[ $key ] = $value;
+		}
+
+		ksort( $prepared, SORT_STRING );
+
+		$string_to_sign = '';
+		foreach ( $prepared as $key => $value ) {
+			$string_to_sign .= $key . (string) $value;
+		}
+
+		return $string_to_sign;
+	}
+
+	/**
+	 * Calculate a hosted-return payload-level signature.
+	 *
+	 * @param array  $data                Payload data.
+	 * @param string $secret              Signature secret.
+	 * @param bool   $convert_underscores Whether to convert PHP-normalised underscores back to dot notation.
+	 * @return string
+	 */
+	private static function calculate_hosted_return_signature( array $data, $secret, $convert_underscores = true ) {
+		$flattened = self::flatten_hosted_return_signature_params( $data );
+		$converted = [];
+
+		foreach ( $flattened as $key => $value ) {
+			$new_key = $convert_underscores ? self::convert_hosted_return_signature_key( $key ) : (string) $key;
+			$converted[ $new_key ] = $value;
+		}
+
+		return hash_hmac( 'sha256', self::build_hosted_return_signature_string( $converted ), $secret );
+	}
+
+	/**
+	 * Parse a URL-encoded body while preserving original form field names such as
+	 * result.code. PHP's normal request parsing changes dots to underscores.
+	 *
+	 * @param string $raw_body Raw request body.
+	 * @return array
+	 */
+	private static function parse_hosted_return_raw_form_body_preserving_keys( $raw_body ) {
+		$raw_body = (string) $raw_body;
+		$fields   = [];
+
+		if ( '' === $raw_body || false === strpos( $raw_body, '=' ) ) {
+			return $fields;
+		}
+
+		$pairs = explode( '&', $raw_body );
+		foreach ( $pairs as $pair ) {
+			if ( '' === $pair ) {
+				continue;
+			}
+
+			$parts = explode( '=', $pair, 2 );
+			$key   = urldecode( str_replace( '+', ' ', $parts[0] ) );
+			$value = isset( $parts[1] ) ? urldecode( str_replace( '+', ' ', $parts[1] ) ) : '';
+
+			if ( '' === $key ) {
+				continue;
+			}
+
+			$fields[ $key ] = $value;
+		}
+
+		return $fields;
+	}
+
+	/**
+	 * Calculate all supported hosted-return payload signature variants.
+	 *
+	 * @param array  $data     Parsed hosted-return payload data.
+	 * @param string $secret   Signature secret.
+	 * @param string $raw_body Raw request body where available.
+	 * @return array
+	 */
+	private static function calculate_hosted_return_signature_variants( array $data, $secret, $raw_body = '' ) {
+		$variants = [
+			'parsed-dot-normalised' => self::calculate_hosted_return_signature( $data, $secret, true ),
+			'parsed-exact'          => self::calculate_hosted_return_signature( $data, $secret, false ),
+		];
+
+		$raw_fields = self::parse_hosted_return_raw_form_body_preserving_keys( $raw_body );
+		if ( ! empty( $raw_fields ) ) {
+			$variants['raw-exact'] = hash_hmac( 'sha256', self::build_hosted_return_signature_string( $raw_fields ), $secret );
+
+			$raw_dot_fields = [];
+			foreach ( $raw_fields as $key => $value ) {
+				$raw_dot_fields[ self::convert_hosted_return_signature_key( $key ) ] = $value;
+			}
+			$variants['raw-dot-normalised'] = hash_hmac( 'sha256', self::build_hosted_return_signature_string( $raw_dot_fields ), $secret );
+		}
+
+		return array_unique( $variants );
+	}
+
+	/**
+	 * Validate Peach's payload-level hosted-return signature field. Used before
+	 * trusting the browser return POST as the final checkout result.
+	 *
+	 * @param array  $data     Hosted-return payload data.
+	 * @param string $raw_body Raw request body, where available.
+	 * @param int    $order_id WooCommerce order ID for logging.
+	 * @return true|WP_Error
+	 */
+	public static function verify_hosted_return_payload_signature( array $data, $raw_body = '', $order_id = 0 ) {
+		$secrets = self::get_hosted_return_signature_secrets();
+
+		if ( empty( $secrets ) ) {
+			PP_Gateway_Logger::error( 'Peach hosted return signature validation failed for order #' . absint( $order_id ) . ' - missing Secret Token / Client Secret.' );
+			return new WP_Error( 'peach_missing_hosted_return_signature_secret', 'missing Peach hosted return payload signature secret' );
+		}
+
+		$received_signature = '';
+		if ( isset( $data['signature'] ) && '' !== $data['signature'] ) {
+			$received_signature = trim( (string) $data['signature'] );
+		}
+
+		if ( '' === $received_signature ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return signature validation failed for order #' . absint( $order_id ) . ' - missing signature field.' );
+			return new WP_Error( 'peach_missing_hosted_return_payload_signature', 'missing Peach hosted return payload signature' );
+		}
+
+		$received_signature = self::normalise_hosted_return_signature( $received_signature );
+		$matched_variant    = '';
+		$matched_secret     = '';
+
+		foreach ( $secrets as $secret_label => $secret ) {
+			$variants = self::calculate_hosted_return_signature_variants( $data, $secret, $raw_body );
+
+			foreach ( $variants as $variant_name => $calculated_signature ) {
+				if ( hash_equals( $calculated_signature, $received_signature ) ) {
+					$matched_variant = (string) $variant_name;
+					$matched_secret  = (string) $secret_label;
+					break 2;
+				}
+			}
+		}
+
+		if ( '' !== $matched_variant ) {
+			PP_Gateway_Logger::info( 'Peach hosted return signature validation passed for order #' . absint( $order_id ) . ' using ' . sanitize_text_field( $matched_secret ) . ' / ' . sanitize_text_field( $matched_variant ) . '.' );
+			return true;
+		}
+
+		PP_Gateway_Logger::warning( 'Peach hosted return signature validation failed for order #' . absint( $order_id ) . ' - invalid signature.' );
+		return new WP_Error( 'peach_invalid_hosted_return_payload_signature', 'invalid Peach hosted return payload signature' );
+	}
+
+	/**
+	 * Build the payment result array used by existing order-processing logic from
+	 * a signature-verified hosted-return POST payload.
+	 *
+	 * @param WC_Order $order          WooCommerce order.
+	 * @param array    $return_payload Signature-verified hosted-return payload.
+	 * @return array|WP_Error
+	 */
+	public static function normalise_signed_hosted_return_result_for_order( WC_Order $order, array $return_payload ) {
+		$checkout_id = self::get_first_response_value( $return_payload, [ 'checkoutId', 'checkout_id' ] );
+		if ( '' !== (string) $checkout_id ) {
+			$checkout_check = self::validate_checkout_id_for_order( $order, $checkout_id );
+			if ( is_wp_error( $checkout_check ) ) {
+				return $checkout_check;
+			}
+		}
+
+		$result = $return_payload;
+
+		$result_code = self::get_first_response_value( $return_payload, [ [ 'result', 'code' ], 'result_code', 'result.code' ] );
+		if ( '' === (string) $result_code ) {
+			return new WP_Error( 'peach_missing_result_code', __( 'Missing Peach Payments result code.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		if ( ! isset( $result['result'] ) || ! is_array( $result['result'] ) ) {
+			$result['result'] = [];
+		}
+
+		$result['result']['code'] = sanitize_text_field( (string) $result_code );
+		$result['result_code']    = sanitize_text_field( (string) $result_code );
+
+		$result_description = self::get_first_response_value( $return_payload, [ [ 'result', 'description' ], 'result_description', 'result.description' ] );
+		if ( '' !== (string) $result_description ) {
+			$result['result']['description'] = sanitize_text_field( (string) $result_description );
+			$result['result_description']    = sanitize_text_field( (string) $result_description );
+		}
+
+		$fields = [
+			'checkoutId'            => [ 'checkoutId', 'checkout_id' ],
+			'merchantTransactionId' => [ 'merchantTransactionId', 'merchant_transaction_id' ],
+			'merchantInvoiceId'     => [ 'merchantInvoiceId', 'merchant_invoice_id' ],
+			'amount'                => [ 'amount' ],
+			'currency'              => [ 'currency' ],
+			'id'                    => [ 'id', 'paymentId', 'payment_id' ],
+			'registrationId'        => [ 'registrationId', 'registration_id' ],
+			'paymentBrand'          => [ 'paymentBrand', 'payment_brand' ],
+			'paymentType'           => [ 'paymentType', 'payment_type' ],
+			'card_last4Digits'      => [ 'card_last4Digits', 'card.last4Digits' ],
+			'card_expiryMonth'      => [ 'card_expiryMonth', 'card.expiryMonth' ],
+			'card_expiryYear'       => [ 'card_expiryYear', 'card.expiryYear' ],
+		];
+
+		foreach ( $fields as $target_key => $paths ) {
+			$value = self::get_first_response_value( $return_payload, $paths );
+			$result = self::set_missing_checkout_status_value( $result, $target_key, $value );
+		}
+
+		PP_Gateway_Logger::info( 'Peach hosted return signature-verified normalised result for order #' . $order->get_id() . ': ' . print_r( $result, true ) );
+
+		return $result;
+	}
+
+	/**
+	 * Log Checkout V2 hosted-return debug data for this temporary live Apple Pay
+	 * verification path. The bearer token is intentionally never logged.
+	 *
+	 * @param string $level   Log level.
+	 * @param string $message Log message.
+	 * @param array  $context Context values.
+	 * @return void
+	 */
+	private static function log_checkout_v2_return_debug( $level, $message, array $context = [] ) {
+		$log = $message;
+
+		if ( ! empty( $context ) ) {
+			$log .= "\n" . print_r( $context, true );
+		}
+
+		switch ( strtolower( (string) $level ) ) {
+			case 'error':
+				PP_Gateway_Logger::error( $log );
+				break;
+			case 'warning':
+				PP_Gateway_Logger::warning( $log );
+				break;
+			case 'debug':
+				PP_Gateway_Logger::debug( $log );
+				break;
+			case 'info':
+			default:
+				PP_Gateway_Logger::info( $log );
+				break;
+		}
+	}
+
+	/**
+	 * Query Peach Checkout V2 status by checkoutId for hosted-return verification.
+	 * This is used when the Checkout V2 hosted return does not include the legacy
+	 * resourcePath parameter.
+	 *
+	 * @param string $checkout_id     Peach Checkout V2 checkout ID.
+	 * @param int    $order_id        WooCommerce order ID for logging.
+	 * @param array  $return_payload  Parsed return POST payload for debug logging.
+	 * @param string $raw_return_body Raw return POST body for debug logging.
+	 * @return array|WP_Error
+	 */
+	public static function get_checkout_status_from_checkout_id( $checkout_id, $order_id = 0, array $return_payload = [], $raw_return_body = '' ) {
+		$checkout_id = self::normalise_checkout_id( $checkout_id );
+		if ( is_wp_error( $checkout_id ) ) {
+			return $checkout_id;
+		}
+
+		$token_response = WC_Gateway_Peach_Hosted::generate_access_token();
+		$token          = ! empty( $token_response['access_token'] ) ? trim( (string) $token_response['access_token'] ) : '';
+		$token_source   = 'checkout_oauth_token';
+
+		if ( '' === $token ) {
+			$token_response_log = isset( $token_response['raw'] ) && is_array( $token_response['raw'] ) ? $token_response['raw'] : [];
+			foreach ( [ 'access_token', 'token', 'refresh_token', 'id_token' ] as $sensitive_key ) {
+				if ( isset( $token_response_log[ $sensitive_key ] ) ) {
+					$token_response_log[ $sensitive_key ] = '***not logged***';
+				}
+			}
+
+			$token_request_log = isset( $token_response['body'] ) && is_array( $token_response['body'] ) ? $token_response['body'] : [];
+			if ( isset( $token_request_log['clientSecret'] ) ) {
+				$token_request_log['clientSecret'] = '***not logged***';
+			}
+
+			self::log_checkout_v2_return_debug(
+				'warning',
+				'Peach hosted return Checkout V2 status could not generate a Checkout OAuth token; falling back to the configured Access Token if available.',
+				[
+					'order_id'              => (int) $order_id,
+					'checkoutId'            => $checkout_id,
+					'oauth_token_url'       => isset( $token_response['url'] ) ? $token_response['url'] : '',
+					'oauth_token_request'   => $token_request_log,
+					'oauth_token_response'  => $token_response_log,
+				]
+			);
+
+			$token        = trim( (string) self::get_auth_token() );
+			$token_source = 'configured_access_token_fallback';
+		}
+
+		if ( '' === $token ) {
+			return new WP_Error( 'peach_missing_credentials', __( 'Missing Peach Payments credentials for payment verification.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		$url             = self::get_checkout_endpoint_url() . 'v2/checkout/' . rawurlencode( $checkout_id ) . '/status';
+		$referer         = get_site_url();
+		$transaction_mode = PP_Gateway_Settings::get( 'transaction_mode' );
+		$ssl              = ( 'INTEGRATOR_TEST' === $transaction_mode ) ? false : true;
+
+		$perform_checkout_status_request = function( array $headers, array $logged_headers, $attempt_label ) use ( $url, $ssl, $checkout_id, $order_id, $return_payload, $raw_return_body, $token_source ) {
+			$request_log = [
+				'order_id'             => (int) $order_id,
+				'method'               => 'GET',
+				'url'                  => $url,
+				'attempt'              => $attempt_label,
+				'token_source'         => $token_source,
+				'headers'              => $logged_headers,
+				'request_payload'      => [
+					'checkoutId' => $checkout_id,
+				],
+				'return_post_payload'  => $return_payload,
+				'raw_return_post_body' => (string) $raw_return_body,
+			];
+
+			self::log_checkout_v2_return_debug(
+				'info',
+				'Peach hosted return Checkout V2 status request.',
+				$request_log
+			);
+
+			$ch = curl_init();
+			curl_setopt( $ch, CURLOPT_URL, $url );
+			curl_setopt( $ch, CURLOPT_HTTPHEADER, $headers );
+			curl_setopt( $ch, CURLOPT_CUSTOMREQUEST, 'GET' );
+			curl_setopt( $ch, CURLOPT_SSL_VERIFYPEER, $ssl );
+			curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
+			curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
+
+			$response_body = curl_exec( $ch );
+			$response_code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+
+			if ( curl_errno( $ch ) ) {
+				$error_message = curl_error( $ch );
+				$errno         = curl_errno( $ch );
+				curl_close( $ch );
+
+				self::log_checkout_v2_return_debug(
+					'error',
+					'Peach hosted return Checkout V2 status cURL error.',
+					[
+						'order_id'        => (int) $order_id,
+						'checkoutId'      => $checkout_id,
+						'url'             => $url,
+						'attempt'         => $attempt_label,
+						'token_source'    => $token_source,
+						'curl_errno'      => $errno,
+						'curl_error'      => $error_message,
+						'request_payload' => [ 'checkoutId' => $checkout_id ],
+					]
+				);
+
+				return new WP_Error( 'peach_api_curl_error', $error_message );
+			}
+
+			curl_close( $ch );
+
+			$response_data = json_decode( (string) $response_body, true );
+
+			self::log_checkout_v2_return_debug(
+				'info',
+				'Peach hosted return Checkout V2 status response.',
+				[
+					'order_id'         => (int) $order_id,
+					'checkoutId'       => $checkout_id,
+					'url'              => $url,
+					'attempt'          => $attempt_label,
+					'token_source'     => $token_source,
+					'http_code'        => (int) $response_code,
+					'raw_response'     => (string) $response_body,
+					'decoded_response' => $response_data,
+				]
+			);
+
+			return [
+				'http_code' => (int) $response_code,
+				'raw'       => (string) $response_body,
+				'decoded'   => $response_data,
+			];
+		};
+
+		$authenticated_headers = [
+			'Authorization: Bearer ' . $token,
+			'Accept: application/json',
+			'Content-Type: application/json',
+			'Referer: ' . $referer,
+		];
+
+		$authenticated_logged_headers = [
+			'Authorization' => 'Bearer ***not logged***',
+			'Accept'        => 'application/json',
+			'Content-Type'  => 'application/json',
+			'Referer'       => $referer,
+		];
+
+		$response = $perform_checkout_status_request( $authenticated_headers, $authenticated_logged_headers, 'authenticated_checkout_oauth' );
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		if ( 401 === (int) $response['http_code'] ) {
+			self::log_checkout_v2_return_debug(
+				'warning',
+				'Peach hosted return Checkout V2 status returned 401 with Authorization header. Retrying once with the documented Accept-only status request.',
+				[
+					'order_id'    => (int) $order_id,
+					'checkoutId'  => $checkout_id,
+					'url'         => $url,
+					'token_source'=> $token_source,
+				]
+			);
+
+			$accept_only_headers = [
+				'Accept: application/json',
+				'Referer: ' . $referer,
+			];
+
+			$accept_only_logged_headers = [
+				'Accept'  => 'application/json',
+				'Referer' => $referer,
+			];
+
+			$response = $perform_checkout_status_request( $accept_only_headers, $accept_only_logged_headers, 'accept_only_retry' );
+
+			if ( is_wp_error( $response ) ) {
+				return $response;
+			}
+		}
+
+		if ( $response['http_code'] < 200 || $response['http_code'] >= 300 ) {
+			return new WP_Error( 'peach_api_http_error', __( 'Payment verification failed at Peach Payments.', WC_PEACH_TEXT_DOMAIN ), $response['decoded'] );
+		}
+
+		if ( ! is_array( $response['decoded'] ) ) {
+			return new WP_Error( 'peach_api_invalid_json', __( 'Invalid payment verification response from Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		return $response['decoded'];
+	}
+
+	/**
+	 * Return a nested/flat Checkout V2 status response value.
+	 *
+	 * @param array $response Response data.
+	 * @param array $paths    List of string keys or nested key arrays.
+	 * @return mixed|null
+	 */
+	private static function get_checkout_status_value( array $response, array $paths ) {
+		return self::get_first_response_value( $response, $paths );
+	}
+
+	/**
+	 * Copy the first available value into a response path when the path is missing.
+	 *
+	 * @param array  $target Target response.
+	 * @param string $key    Top-level target key.
+	 * @param mixed  $value  Value to set.
+	 * @return array
+	 */
+	private static function set_missing_checkout_status_value( array $target, $key, $value ) {
+		if ( null !== $value && '' !== $value && ( ! isset( $target[ $key ] ) || '' === $target[ $key ] || null === $target[ $key ] ) ) {
+			$target[ $key ] = $value;
+		}
+
+		return $target;
+	}
+
+	/**
+	 * Build the payment result array used by existing order-processing logic from
+	 * the verified Checkout V2 status response and the hosted-return POST.
+	 *
+	 * The status endpoint is the trusted server-to-server verification step. The
+	 * hosted-return POST is only used to fill fields that the status response does
+	 * not always repeat, after the checkoutId has been matched to the order.
+	 *
+	 * @param WC_Order $order          WooCommerce order.
+	 * @param array    $status_result  Checkout V2 status response.
+	 * @param array    $return_payload Hosted-return POST payload.
+	 * @return array|WP_Error
+	 */
+	public static function normalise_checkout_v2_status_result_for_order( WC_Order $order, array $status_result, array $return_payload = [] ) {
+		$posted_checkout_id = self::get_checkout_status_value( $return_payload, [ 'checkoutId', 'checkout_id' ] );
+		$status_checkout_id = self::get_checkout_status_value(
+			$status_result,
+			[
+				'checkoutId',
+				'checkout_id',
+				[ 'checkout', 'id' ],
+				[ 'checkout', 'checkoutId' ],
+				[ 'payload', 'checkoutId' ],
+			]
+		);
+
+		$checkout_id = '' !== (string) $status_checkout_id ? $status_checkout_id : $posted_checkout_id;
+		$checkout_check = self::validate_checkout_id_for_order( $order, $checkout_id );
+		if ( is_wp_error( $checkout_check ) ) {
+			return $checkout_check;
+		}
+
+		$result = $status_result;
+
+		$posted_result_code = self::get_checkout_status_value( $return_payload, [ [ 'result', 'code' ], 'result_code', 'result.code' ] );
+		$status_result_code = self::get_checkout_status_value( $status_result, [ [ 'result', 'code' ], 'result_code', 'result.code', [ 'payment', 'result', 'code' ], [ 'payload', 'result', 'code' ] ] );
+		$status             = self::get_checkout_status_value( $status_result, [ 'status', [ 'checkout', 'status' ], [ 'payment', 'status' ], [ 'payload', 'status' ] ] );
+		$status_normalised  = strtolower( trim( sanitize_text_field( (string) $status ) ) );
+		$status_successful  = in_array( $status_normalised, [ 'successful', 'success', 'succeeded', 'completed', 'complete', 'paid' ], true );
+
+		if ( '' !== (string) $status_result_code ) {
+			$result_code = $status_result_code;
+		} elseif ( $status_successful && '' !== (string) $posted_result_code ) {
+			$result_code = $posted_result_code;
+		} else {
+			PP_Gateway_Logger::warning( 'Peach hosted return Checkout V2 status response for order #' . $order->get_id() . ' did not include a trusted final result code. Checkout status: ' . sanitize_text_field( (string) $status ) . '. Posted result code: ' . sanitize_text_field( (string) $posted_result_code ) . '. Response: ' . print_r( $status_result, true ) );
+			return new WP_Error( 'peach_missing_result_code', __( 'Missing Peach Payments result code.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		if ( ! isset( $result['result'] ) || ! is_array( $result['result'] ) ) {
+			$result['result'] = [];
+		}
+
+		$result['result']['code'] = sanitize_text_field( (string) $result_code );
+		$result['result_code']    = sanitize_text_field( (string) $result_code );
+
+		$result_description = self::get_checkout_status_value( $status_result, [ [ 'result', 'description' ], 'result_description', 'result.description', [ 'payment', 'result', 'description' ], [ 'payload', 'result', 'description' ] ] );
+		if ( '' === (string) $result_description ) {
+			$result_description = self::get_checkout_status_value( $return_payload, [ [ 'result', 'description' ], 'result_description', 'result.description' ] );
+		}
+		if ( '' !== (string) $result_description ) {
+			$result['result']['description'] = sanitize_text_field( (string) $result_description );
+			$result['result_description']    = sanitize_text_field( (string) $result_description );
+		}
+
+		$fields = [
+			'checkoutId'            => [ 'checkoutId', 'checkout_id', [ 'checkout', 'id' ], [ 'checkout', 'checkoutId' ], [ 'payload', 'checkoutId' ] ],
+			'merchantTransactionId' => [ 'merchantTransactionId', 'merchant_transaction_id', [ 'checkout', 'merchantTransactionId' ], [ 'payment', 'merchantTransactionId' ], [ 'payload', 'merchantTransactionId' ] ],
+			'merchantInvoiceId'     => [ 'merchantInvoiceId', 'merchant_invoice_id', [ 'checkout', 'merchantInvoiceId' ], [ 'payment', 'merchantInvoiceId' ], [ 'payload', 'merchantInvoiceId' ] ],
+			'amount'                => [ 'amount', [ 'checkout', 'amount' ], [ 'payment', 'amount' ], [ 'payload', 'amount' ] ],
+			'currency'              => [ 'currency', [ 'checkout', 'currency' ], [ 'payment', 'currency' ], [ 'payload', 'currency' ] ],
+			'id'                    => [ 'paymentId', 'payment_id', [ 'payment', 'id' ], [ 'payload', 'id' ], [ 'payload', 'paymentId' ], [ 'transaction', 'id' ] ],
+			'registrationId'        => [ 'registrationId', 'registration_id', [ 'payment', 'registrationId' ], [ 'payload', 'registrationId' ] ],
+			'paymentBrand'          => [ 'paymentBrand', 'payment_brand', [ 'payment', 'paymentBrand' ], [ 'payload', 'paymentBrand' ] ],
+			'paymentType'           => [ 'paymentType', 'payment_type', [ 'payment', 'paymentType' ], [ 'payload', 'paymentType' ] ],
+			'card_last4Digits'      => [ 'card_last4Digits', 'card.last4Digits', [ 'card', 'last4Digits' ], [ 'payment', 'card', 'last4Digits' ], [ 'payload', 'card', 'last4Digits' ] ],
+			'card_expiryMonth'      => [ 'card_expiryMonth', 'card.expiryMonth', [ 'card', 'expiryMonth' ], [ 'payment', 'card', 'expiryMonth' ], [ 'payload', 'card', 'expiryMonth' ] ],
+			'card_expiryYear'       => [ 'card_expiryYear', 'card.expiryYear', [ 'card', 'expiryYear' ], [ 'payment', 'card', 'expiryYear' ], [ 'payload', 'card', 'expiryYear' ] ],
+		];
+
+		foreach ( $fields as $target_key => $paths ) {
+			$value = self::get_checkout_status_value( $status_result, $paths );
+			if ( null === $value || '' === $value ) {
+				$value = self::get_checkout_status_value( $return_payload, $paths );
+			}
+			$result = self::set_missing_checkout_status_value( $result, $target_key, $value );
+		}
+
+		if ( empty( $result['id'] ) ) {
+			$posted_payment_id = self::get_checkout_status_value( $return_payload, [ 'id', 'paymentId', 'payment_id' ] );
+			$result = self::set_missing_checkout_status_value( $result, 'id', $posted_payment_id );
+		}
+
+		PP_Gateway_Logger::info( 'Peach hosted return Checkout V2 normalised result for order #' . $order->get_id() . ': ' . print_r( $result, true ) );
+
+		return $result;
+	}
+
 	/**
 	 * Normalise and validate a Peach Payments resourcePath before using it in a
 	 * server-to-server lookup. Public return URLs may include this value, so it
@@ -819,10 +1611,11 @@ class PP_Peach_API {
 			return new WP_Error( 'peach_wrong_gateway', __( 'The WooCommerce order does not belong to the Peach Payments gateway.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
-		$result_code = self::get_first_response_value( $response, [ [ 'result', 'code' ], 'result_code' ] );
+		$result_code = self::get_first_response_value( $response, [ [ 'result', 'code' ], 'result_code', 'result.code', [ 'payment', 'result', 'code' ], [ 'payload', 'result', 'code' ] ] );
 		if ( empty( $result_code ) ) {
 			return new WP_Error( 'peach_missing_result_code', __( 'Missing Peach Payments result code.', WC_PEACH_TEXT_DOMAIN ) );
 		}
+
 
 		$expected_reference = self::get_expected_merchant_transaction_id( $order );
 		$received_reference = self::get_first_response_value(
@@ -830,6 +1623,10 @@ class PP_Peach_API {
 			[
 				'merchantTransactionId',
 				'merchantInvoiceId',
+				[ 'checkout', 'merchantTransactionId' ],
+				[ 'checkout', 'merchantInvoiceId' ],
+				[ 'payment', 'merchantTransactionId' ],
+				[ 'payment', 'merchantInvoiceId' ],
 				[ 'payload', 'merchantTransactionId' ],
 				[ 'payload', 'merchantInvoiceId' ],
 			]
@@ -839,8 +1636,8 @@ class PP_Peach_API {
 			return new WP_Error( 'peach_merchant_reference_mismatch', __( 'Peach Payments merchant reference did not match the WooCommerce order.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
-		$received_amount   = self::get_first_response_value( $response, [ 'amount', [ 'payment', 'amount' ], [ 'payload', 'amount' ], [ 'payload', 'payment', 'amount' ] ] );
-		$received_currency = self::get_first_response_value( $response, [ 'currency', [ 'payment', 'currency' ], [ 'payload', 'currency' ], [ 'payload', 'payment', 'currency' ] ] );
+		$received_amount   = self::get_first_response_value( $response, [ 'amount', [ 'checkout', 'amount' ], [ 'payment', 'amount' ], [ 'payload', 'amount' ], [ 'payload', 'payment', 'amount' ] ] );
+		$received_currency = self::get_first_response_value( $response, [ 'currency', [ 'checkout', 'currency' ], [ 'payment', 'currency' ], [ 'payload', 'currency' ], [ 'payload', 'payment', 'currency' ] ] );
 
 		if ( null === $received_amount || '' === $received_amount ) {
 			return new WP_Error( 'peach_missing_amount', __( 'Missing Peach Payments amount for order verification.', WC_PEACH_TEXT_DOMAIN ) );
@@ -1114,9 +1911,12 @@ public static function create_checkout( WC_Order $order ) {
 			return [ 'result' => 'failure' ];
 		}
 
-		if ( ! empty( $response['id'] ) ) {
-			$order->update_meta_data( '_peach_checkout_id', sanitize_text_field( (string) $response['id'] ) );
+		$checkout_id = self::get_checkout_id_from_session_response( $response );
+		if ( '' !== $checkout_id ) {
+			$order->update_meta_data( '_peach_checkout_id', $checkout_id );
 			$order->save();
+		} else {
+			PP_Gateway_Logger::warning( 'Peach checkout session response for order #' . $order_id . ' did not include a checkoutId/id for hosted-return verification. Response: ' . print_r( $response, true ) );
 		}
 	
 		return $response;

@@ -62,6 +62,9 @@ class PP_Gateway_My_Cards_Endpoint {
 	 */
 	public static function endpoint_content() {
 		$user_id     = get_current_user_id();
+		if ( class_exists( 'PP_Gateway_Token_Add_Handler' ) && method_exists( 'PP_Gateway_Token_Add_Handler', 'process_pending_add_card_checkouts_for_user' ) ) {
+			PP_Gateway_Token_Add_Handler::process_pending_add_card_checkouts_for_user( $user_id, true );
+		}
 		$saved_cards = get_user_meta( $user_id, 'my-cards', true );
 		$options = get_option( 'woocommerce_peach-payments_settings');
 
