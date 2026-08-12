@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.8
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.0.6
-Version: 4.0.6
+Stable tag: 4.0.7
+Version: 4.0.7
 License: GPLv3
 
 
@@ -44,6 +44,13 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 4.0.7 =
+  * Fix - Valid Peach payment returns are no longer rejected when the local return token or checkout ID has changed after a refresh, retry, or new payment session. Signature validation now runs first for signed results.
+  * Fix - Subscription renewals failing with “missing saved card token (registration ID)”.
+  * Enhancement - SSL is no longer checked on every plugin load. The check now runs only on activation and after a plugin version update, and uses the site’s HTTPS configuration instead of the current request protocol.
+  * Enhancement - Removed repeated SSL warning logging; the warning is shown only as an admin notice when relevant.
+  * Enhancement - Improved checkout icons.‌
 
 = 4.0.6 =
   * Fix - Apple Pay redirection to Thank you page

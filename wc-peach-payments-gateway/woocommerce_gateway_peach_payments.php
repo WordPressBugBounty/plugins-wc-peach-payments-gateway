@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/" target="_blank" rel="noopener noreferrer">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 4.0.6
+ * Version: 4.0.7
  * Requires at least: 6.8
  * Tested up to: 7.0
  * Requires PHP: 7.4
@@ -55,10 +55,14 @@ register_deactivation_hook( __FILE__, 'wc_peach_payments_deactivate' );
 // Load after WooCommerce
 add_action( 'plugins_loaded', 'wc_peach_payments_init', 11 );
 add_action( 'plugins_loaded', 'wc_peach_payments_maybe_schedule_rewrite_flush', 12 );
+add_action( 'admin_init', 'wc_peach_payments_maybe_run_install_update_checks' );
+add_action( 'admin_notices', 'wc_peach_payments_ssl_admin_notice' );
 
 function wc_peach_payments_activate() {
 	update_option( 'wc_peach_gateway_needs_rewrite_flush', 'yes' );
 	update_option( 'wc_peach_gateway_rewrite_schema_version', WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION );
+	wc_peach_payments_run_ssl_check();
+	update_option( 'wc_peach_gateway_installed_version', WC_PEACH_GATEWAY_VERSION );
 }
 
 function wc_peach_payments_deactivate() {
@@ -77,6 +81,50 @@ function wc_peach_payments_maybe_schedule_rewrite_flush() {
 		delete_option( 'pp_cards_endpoint_flushed' );
 		delete_option( 'peach_change_card_endpoint_flushed' );
 	}
+}
+
+/**
+ * Check the site's HTTPS configuration after plugin activation or update.
+ */
+function wc_peach_payments_run_ssl_check() {
+	$uses_https = function_exists( 'wp_is_using_https' ) ? wp_is_using_https() : is_ssl();
+
+	if ( $uses_https ) {
+		delete_option( 'wc_peach_gateway_show_ssl_notice' );
+		return;
+	}
+
+	update_option( 'wc_peach_gateway_show_ssl_notice', 'yes' );
+}
+
+/**
+ * Run installation/update checks once when the plugin version changes.
+ */
+function wc_peach_payments_maybe_run_install_update_checks() {
+	$installed_version = (string) get_option( 'wc_peach_gateway_installed_version', '' );
+
+	if ( WC_PEACH_GATEWAY_VERSION === $installed_version ) {
+		return;
+	}
+
+	wc_peach_payments_run_ssl_check();
+	update_option( 'wc_peach_gateway_installed_version', WC_PEACH_GATEWAY_VERSION );
+}
+
+/**
+ * Display the SSL warning once after activation or update.
+ */
+function wc_peach_payments_ssl_admin_notice() {
+	if ( ! current_user_can( 'manage_woocommerce' ) ) {
+		return;
+	}
+
+	if ( 'yes' !== get_option( 'wc_peach_gateway_show_ssl_notice', 'no' ) ) {
+		return;
+	}
+
+	echo '<div class="notice notice-warning is-dismissible"><p><strong>SSL is not enabled. Peach Payments requires HTTPS to process payments securely.</strong></p></div>';
+	delete_option( 'wc_peach_gateway_show_ssl_notice' );
 }
 
 /*

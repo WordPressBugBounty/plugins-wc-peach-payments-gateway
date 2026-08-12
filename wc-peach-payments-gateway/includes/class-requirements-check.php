@@ -36,12 +36,6 @@ class PP_Gateway_Requirements {
 			return false;
 		}
 
-		// Check SSL
-		if ( ! is_ssl() ) {
-			add_action( 'admin_notices', [ __CLASS__, 'ssl_notice' ] );
-			PP_Gateway_Logger::warning( 'SSL is not enabled.' );
-		}
-
 		// Check for multiple Sequential Order Numbers plugins
 		if ( class_exists( 'WC_Sequential_Order_Numbers_Pro_Loader' ) && class_exists( 'WC_Sequential_Order_Numbers_Loader' ) ) {
 			add_action( 'admin_notices', [ __CLASS__, 'sequential_order_warning' ] );

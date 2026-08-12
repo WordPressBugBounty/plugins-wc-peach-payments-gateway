@@ -10,23 +10,45 @@
 }
 
 .peach-logos {
-    display: flex;
-    flex-direction: row;
-    gap: 10px;
-    width: 100%;
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: 20px;
+	width: 100%;
 	flex-wrap:wrap;
+	margin: 15px 0;
 }
 
-.peach-logos img{
-    margin:0 !important;
+.peach-logos span {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 52px;
+	width: 52px;
+	height: 31px;
+	padding: 2px;
+	overflow: hidden;
+	box-sizing: border-box;
+	background: transparent;
+	border: 1px solid #dfe3e8;
+	border-radius: 5px;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.peach-logos img {
+	display: block;
+	width: 100% !important;
+	height: 100% !important;
+	max-width: 100% !important;
+	max-height: 100% !important;
+	margin: 0 !important;
+	object-fit: contain;
 }
 
 @media all and (max-width: 767px) {
 	.peach-logos {
-	  display: grid;
-	  grid-template-columns: repeat(4, 1fr); /* 4 equal columns */
-	  gap: 10px; /* adjust spacing as needed */
-	  padding: 10px;
+		gap: 10px;
+		padding: 10px 0;
 	}
 }
 

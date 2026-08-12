@@ -393,9 +393,9 @@ class PP_Peach_API {
 			if ( $response_code < 200 || $response_code >= 300 ) {
 				self::log_error(
 					"Unexpected HTTP response code {$response_code} from {$endpoint}",
-					$full_url,
 					$payload,
-					$response_data
+					$response_data,
+					$full_url
 				);
 		
 				return new WP_Error(
@@ -822,15 +822,20 @@ class PP_Peach_API {
 	 * a signature-verified hosted-return POST payload.
 	 *
 	 * @param WC_Order $order          WooCommerce order.
-	 * @param array    $return_payload Signature-verified hosted-return payload.
+	 * @param array    $return_payload    Signature-verified hosted-return payload.
+	 * @param bool     $enforce_checkout_id Whether the checkoutId must match the latest locally stored checkout ID.
 	 * @return array|WP_Error
 	 */
-	public static function normalise_signed_hosted_return_result_for_order( WC_Order $order, array $return_payload ) {
+	public static function normalise_signed_hosted_return_result_for_order( WC_Order $order, array $return_payload, $enforce_checkout_id = true ) {
 		$checkout_id = self::get_first_response_value( $return_payload, [ 'checkoutId', 'checkout_id' ] );
 		if ( '' !== (string) $checkout_id ) {
 			$checkout_check = self::validate_checkout_id_for_order( $order, $checkout_id );
 			if ( is_wp_error( $checkout_check ) ) {
-				return $checkout_check;
+				if ( $enforce_checkout_id ) {
+					return $checkout_check;
+				}
+
+				PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order->get_id() . ' contained a signature-verified checkoutId that did not match the latest locally stored checkoutId. Continuing because the Peach payload signature passed; merchant reference, amount and currency will still be validated against the WooCommerce order.' );
 			}
 		}
 
@@ -2023,6 +2028,7 @@ public static function create_checkout( WC_Order $order ) {
 		]);
 		
 		$responseData = curl_exec($ch);
+		curl_close( $ch );
 		$response = json_decode($responseData);
 		
 		$payment_initial_id = $CardholderInitiatedTransactionID = '';
