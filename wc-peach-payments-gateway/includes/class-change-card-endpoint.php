@@ -321,13 +321,26 @@ class PP_Gateway_Change_Card_Endpoint {
 			$new_display = (string) $selected_card['num'];
 		}
 
+		$selected_initial_id = is_array( $selected_card ) && isset( $selected_card['payment_initial_id'] ) ? trim( (string) $selected_card['payment_initial_id'] ) : '';
+		$selected_payment_order_id = is_array( $selected_card ) && isset( $selected_card['payment_order_id'] ) ? trim( (string) $selected_card['payment_order_id'] ) : '';
+
 		// Update subscription meta.
 		try {
 			$subscription->update_meta_data( 'payment_registration_id', $selected_reg_id );
 			$subscription->update_meta_data( '_peach_subscription_payment_method', $selected_reg_id );
+			if ( '' !== $selected_initial_id ) {
+				$subscription->update_meta_data( 'payment_initial_id', $selected_initial_id );
+			} else {
+				$subscription->delete_meta_data( 'payment_initial_id' );
+			}
+			if ( '' !== $selected_payment_order_id ) {
+				$subscription->update_meta_data( 'payment_order_id', $selected_payment_order_id );
+			} else {
+				$subscription->delete_meta_data( 'payment_order_id' );
+			}
 			$subscription->save();
 
-			// Update parent order meta too (best-effort, keeps your renewal handler happy).
+			// Update parent order meta too (best-effort, keeps renewal credential fallback aligned).
 			$parent_order    = null;
 			$parent_order_id = method_exists( $subscription, 'get_parent_id' ) ? (int) $subscription->get_parent_id() : 0;
 			if ( $parent_order_id ) {
@@ -335,6 +348,16 @@ class PP_Gateway_Change_Card_Endpoint {
 				if ( $parent_order ) {
 					$parent_order->update_meta_data( 'payment_registration_id', $selected_reg_id );
 					$parent_order->update_meta_data( '_peach_subscription_payment_method', $selected_reg_id );
+					if ( '' !== $selected_initial_id ) {
+						$parent_order->update_meta_data( 'payment_initial_id', $selected_initial_id );
+					} else {
+						$parent_order->delete_meta_data( 'payment_initial_id' );
+					}
+					if ( '' !== $selected_payment_order_id ) {
+						$parent_order->update_meta_data( 'payment_order_id', $selected_payment_order_id );
+					} else {
+						$parent_order->delete_meta_data( 'payment_order_id' );
+					}
 					$parent_order->save();
 				}
 			}
@@ -359,8 +382,15 @@ class PP_Gateway_Change_Card_Endpoint {
 			PP_Gateway_Logger::info(
 				'Change Card: updated subscription #' . $subscription_id .
 				' user #' . get_current_user_id() .
-				' from [' . $old_display . '] to [' . $new_display . '].'
+				' from [' . $old_display . '] to [' . $new_display . ']. Matching payment_initial_id: ' . ( '' !== $selected_initial_id ? 'available' : 'not stored' ) . '. Matching payment_order_id: ' . ( '' !== $selected_payment_order_id ? 'available' : 'not stored' ) . '.'
 			);
+
+			if ( '' === $selected_initial_id ) {
+				PP_Gateway_Logger::warning( 'Change Card: selected saved card for subscription #' . $subscription_id . ' has no stored payment_initial_id. Previous initial-transaction metadata was cleared on the subscription and parent order to prevent pairing the selected registration with the previous card credential.' );
+			}
+			if ( '' === $selected_initial_id && '' === $selected_payment_order_id ) {
+				PP_Gateway_Logger::warning( 'Change Card: selected saved card for subscription #' . $subscription_id . ' is a legacy My Cards entry with no stored payment_initial_id or payment_order_id. Renewals will use the selected registration without reusing stale credential metadata.' );
+			}
 
 			wc_add_notice( __( 'Subscription card updated successfully.', WC_PEACH_TEXT_DOMAIN ), 'success' );
 

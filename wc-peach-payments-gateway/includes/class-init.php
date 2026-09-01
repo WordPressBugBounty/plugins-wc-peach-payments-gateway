@@ -63,7 +63,6 @@ class WC_Peach_Gateway_Init {
 
 		// Register token AJAX handler
 		add_action( 'wp_ajax_pp_delete_saved_card', [ 'PP_Gateway_Token_Ajax_Handler', 'handle_delete_card' ] );
-		add_action( 'wp_ajax_pp_add_saved_card', [ 'PP_Gateway_Token_Add_Handler', 'handle_add_card' ] );
 		
 		// Register token add handler (AFTER settings are loaded)
 		PP_Gateway_Token_Add_Handler::register();

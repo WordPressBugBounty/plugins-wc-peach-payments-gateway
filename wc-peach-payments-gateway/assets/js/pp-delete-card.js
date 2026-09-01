@@ -4,6 +4,9 @@ jQuery(document).ready(function($) {
 
     const button = $(this);
     const cardId = button.data('card-id');
+    const cardEntry = button.closest('.pp-card-entry');
+
+    cardEntry.find('.pp-card-delete-error').remove();
 
     if (!cardId) {
       alert('Card ID missing.');
@@ -27,7 +30,7 @@ jQuery(document).ready(function($) {
       },
       success: function(response) {
         if (response.success) {
-          button.closest('.pp-card-entry').fadeOut(300, function() {
+          cardEntry.fadeOut(300, function() {
             $(this).remove();
 
             if ($('.pp-card-entry').length === 0) {
@@ -35,14 +38,40 @@ jQuery(document).ready(function($) {
             }
           });
         } else {
-			let message = 'Failed to delete card.';
-			if (typeof response.data === 'string') {
-			  message = response.data;
-			} else if (response.data && typeof response.data.message === 'string') {
-			  message = response.data.message;
-			}
-			alert(message);
-			button.prop('disabled', false).text('Delete Card');
+          let message = 'Failed to delete card.';
+          if (typeof response.data === 'string') {
+            message = response.data;
+          } else if (response.data && typeof response.data.message === 'string') {
+            message = response.data.message;
+          }
+
+          if (response.data && Array.isArray(response.data.subscriptions) && response.data.subscriptions.length) {
+            const errorBox = $('<div>', {
+              'class': 'woocommerce-error pp-card-delete-error',
+              'role': 'alert'
+            });
+
+            $('<div>').text(message).appendTo(errorBox);
+
+            response.data.subscriptions.forEach(function(subscription) {
+              if (!subscription || !subscription.id || !subscription.url) {
+                return;
+              }
+
+              const linkRow = $('<div>');
+              $('<a>', {
+                href: subscription.url,
+                text: 'Change card for Subscription #' + subscription.id
+              }).appendTo(linkRow);
+              linkRow.appendTo(errorBox);
+            });
+
+            cardEntry.find('.pp-card-actions').after(errorBox);
+          } else {
+            alert(message);
+          }
+
+          button.prop('disabled', false).text('Delete Card');
         }
       },
       error: function(xhr, status, error) {

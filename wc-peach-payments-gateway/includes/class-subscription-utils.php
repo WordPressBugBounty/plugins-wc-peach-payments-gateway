@@ -4,7 +4,11 @@ defined( 'ABSPATH' ) || exit;
 class PP_Gateway_Subscription_Utils {
 
 	public static function is_subscription( $order ) {
-		return function_exists( 'wcs_order_contains_subscription' ) && wcs_order_contains_subscription( $order );
+		if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order ) ) {
+			return true;
+		}
+
+		return function_exists( 'wcs_order_contains_subscription' ) && wcs_order_contains_subscription( $order, 'any' );
 	}
 
 	public static function is_renewal( $order ) {

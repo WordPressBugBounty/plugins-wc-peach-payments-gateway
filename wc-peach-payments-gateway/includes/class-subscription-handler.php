@@ -89,8 +89,9 @@ class PP_Gateway_Subscription_Handler {
 			return;
 		}
 
-		$payment_data = self::get_recurring_payment_data( $order, $parent_order );
-		$registration_id = $payment_data['registration_id'];
+		$payment_data       = self::get_recurring_payment_data( $order, $parent_order );
+		$registration_id    = $payment_data['registration_id'];
+		$payment_initial_id = isset( $payment_data['payment_initial_id'] ) ? trim( (string) $payment_data['payment_initial_id'] ) : '';
 
 
 		if ( ! is_string( $registration_id ) || '' === $registration_id ) {
@@ -136,8 +137,12 @@ class PP_Gateway_Subscription_Handler {
 			// is a separate WooCommerce Subscriptions billing event and must be allowed
 			// to charge even if it is close in time to the previous renewal.
 
+			if ( '' === $payment_initial_id ) {
+				PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' resolved registration ID from ' . $payment_data['source'] . ' but no matching payment_initial_id from ' . ( $payment_data['initial_id_source'] ?? 'not_found' ) . '. Safe fallback resolution will be attempted.' );
+			}
+
 			$api      = new PP_Peach_API();
-			$response = $api->charge_saved_card( $registration_id, $order, $amount_to_charge );
+			$response = $api->charge_saved_card( $registration_id, $order, $amount_to_charge, $payment_initial_id );
 
 			if ( is_wp_error( $response ) ) {
 				$message = $response->get_error_message();
@@ -151,6 +156,8 @@ class PP_Gateway_Subscription_Handler {
 						'reason'               => 'api_wp_error',
 						'registration_source'  => $payment_data['source'],
 						'registration_id_tail' => self::mask_meta_value( $registration_id ),
+						'initial_id_source'    => $payment_data['initial_id_source'] ?? 'not_found',
+						'initial_id_tail'      => self::mask_meta_value( $payment_initial_id ),
 					]
 				);
 				return;
@@ -1206,30 +1213,38 @@ class PP_Gateway_Subscription_Handler {
 		$subscriptions = self::get_subscriptions_for_parent_order( $parent_order );
 
 		foreach ( $subscriptions as $subscription ) {
-			$registration_id = trim( (string) $subscription->get_meta( 'payment_registration_id', true ) );
+			$payment_initial_id = trim( (string) $subscription->get_meta( 'payment_initial_id', true ) );
+			$registration_id    = trim( (string) $subscription->get_meta( 'payment_registration_id', true ) );
 			if ( '' !== $registration_id ) {
 				return [
-					'registration_id' => $registration_id,
-					'source'          => 'subscription:payment_registration_id',
+					'registration_id'   => $registration_id,
+					'source'            => 'subscription:payment_registration_id',
+					'payment_initial_id' => $payment_initial_id,
+					'initial_id_source'  => '' !== $payment_initial_id ? 'subscription:payment_initial_id' : 'not_found',
 				];
 			}
 
 			$registration_id = trim( (string) $subscription->get_meta( '_peach_subscription_payment_method', true ) );
 			if ( '' !== $registration_id ) {
 				return [
-					'registration_id' => $registration_id,
-					'source'          => 'subscription:_peach_subscription_payment_method',
+					'registration_id'   => $registration_id,
+					'source'            => 'subscription:_peach_subscription_payment_method',
+					'payment_initial_id' => $payment_initial_id,
+					'initial_id_source'  => '' !== $payment_initial_id ? 'subscription:payment_initial_id' : 'not_found',
 				];
 			}
 		}
 
+		$parent_initial_id = trim( (string) $parent_order->get_meta( 'payment_initial_id', true ) );
 		$parent_meta_keys = [ '_peach_subscription_payment_method', 'payment_registration_id', '_payment_registration_id' ];
 		foreach ( $parent_meta_keys as $meta_key ) {
 			$registration_id = trim( (string) $parent_order->get_meta( $meta_key, true ) );
 			if ( '' !== $registration_id ) {
 				return [
-					'registration_id' => $registration_id,
-					'source'          => 'parent_order:' . $meta_key,
+					'registration_id'   => $registration_id,
+					'source'            => 'parent_order:' . $meta_key,
+					'payment_initial_id' => $parent_initial_id,
+					'initial_id_source'  => '' !== $parent_initial_id ? 'parent_order:payment_initial_id' : 'not_found',
 				];
 			}
 		}
@@ -1239,23 +1254,30 @@ class PP_Gateway_Subscription_Handler {
 			$registration_id = trim( (string) get_post_meta( $parent_order->get_id(), $meta_key, true ) );
 			if ( '' !== $registration_id ) {
 				return [
-					'registration_id' => $registration_id,
-					'source'          => 'legacy_parent_order:' . $meta_key,
+					'registration_id'   => $registration_id,
+					'source'            => 'legacy_parent_order:' . $meta_key,
+					'payment_initial_id' => $parent_initial_id,
+					'initial_id_source'  => '' !== $parent_initial_id ? 'parent_order:payment_initial_id' : 'not_found',
 				];
 			}
 		}
 
 		$registration_id = trim( (string) $order->get_meta( 'payment_registration_id', true ) );
+		$renewal_initial_id = trim( (string) $order->get_meta( 'payment_initial_id', true ) );
 		if ( '' !== $registration_id ) {
 			return [
-				'registration_id' => $registration_id,
-				'source'          => 'renewal_order:payment_registration_id',
+				'registration_id'   => $registration_id,
+				'source'            => 'renewal_order:payment_registration_id',
+				'payment_initial_id' => $renewal_initial_id,
+				'initial_id_source'  => '' !== $renewal_initial_id ? 'renewal_order:payment_initial_id' : 'not_found',
 			];
 		}
 
 		return [
-			'registration_id' => '',
-			'source'          => 'not_found',
+			'registration_id'   => '',
+			'source'            => 'not_found',
+			'payment_initial_id' => '',
+			'initial_id_source'  => 'not_found',
 		];
 	}
 

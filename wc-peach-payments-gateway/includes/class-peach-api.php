@@ -59,7 +59,12 @@ class PP_Peach_API {
 			$error_msg = curl_error( $ch );
 			curl_close( $ch );
 
-			$this->log_error( $url, $method, $data, $error_msg );
+			$this->log_error(
+				"cURL error while {$method} request: {$error_msg}",
+				$data,
+				null,
+				$url
+			);
 			return new WP_Error( 'peach_api_curl_error', $error_msg );
 		}
 
@@ -72,11 +77,13 @@ class PP_Peach_API {
 		if ( $result_code === $success_code || PP_Gateway_Order_Utils::is_non_final_result_code( $result_code ) ) {
 			return $decoded;
 		}else{
-			PP_Gateway_Logger::error( "Request to Peach API. ".print_r($decoded, true) );
-			PP_Gateway_Logger::error( "Request to Peach API URL. ".print_r($url, true) );
-			PP_Gateway_Logger::error( "Request to Peach API BODY. ".print_r($body, true) );
 			if ( $responseCode >= 400 ) {
-				$this->log_error( $url, $method, $data, $decoded );
+				$this->log_error(
+					"Unexpected HTTP response code {$responseCode}",
+					$data,
+					$decoded,
+					$url
+				);
 				return new WP_Error( 'peach_api_http_error', $decoded['message'] ?? 'API error', $decoded );
 			}
 		}
@@ -100,57 +107,6 @@ class PP_Peach_API {
 		return true;
 	}
 	
-	/**
-	 * Create (register) a new token using Peach Payments API.
-	 *
-	 * @param array $card {
-	 *     @type string $holder     Cardholder name.
-	 *     @type string $num        Card number.
-	 *     @type string $exp_month  Expiry month (MM).
-	 *     @type string $exp_year   Expiry year (YYYY).
-	 * }
-	 *
-	 * @return array|WP_Error Array with registrationId on success, or WP_Error on failure.
-	 */
-	public function create_token( $card ) {
-		$url = $this->base_url . '/v1/registrations';
-		/*
-		$payload = [
-			'paymentBrand' => $this->detect_brand( $card['num'] ),
-			'card' => [
-				'holder'     => $card['holder'],
-				'number'     => $card['card_number'],
-				'expiryMonth'=> $card['expiry_month'],
-				'expiryYear' => $card['expiry_year']
-			]
-		];
-		*/
-		$payload = [
-			//'entityId'          => $entity_id,
-			'paymentBrand'      => 'VISA',
-			'card.number'       => $card['card_number'],
-			'card.holder'       => $card['holder'],
-			'card.expiryMonth'  => $card['expiry_month'],
-			'card.expiryYear'   => $card['holder'],
-			'card.cvv'          => $card['expiry_year'],
-		];
-	
-		$response = $this->post_request( $url, $payload );
-	
-		if ( is_wp_error( $response ) ) {
-			return $response;
-		}
-	
-		if ( empty( $response['id'] ) ) {
-			return new WP_Error( 'no_registration_id', 'No registration ID returned from Peach.' );
-		}
-	
-		return [
-			'registrationId' => $response['id'],
-			'brand'          => $payload['paymentBrand']
-		];
-	}
-
 
 	/**
 	 * Get the base API URL depending on mode.
@@ -210,29 +166,63 @@ class PP_Peach_API {
 	/**
 	 * Mask sensitive data in logs.
 	 *
-	 * @param array $data
-	 * @return array
+	 * Supports both array payloads and URL-encoded query strings.
+	 *
+	 * @param mixed $data Request data to mask.
+	 * @return mixed
 	 */
 	public static function mask_sensitive_data( $data ) {
+		if ( is_string( $data ) ) {
+			$parts = explode( '&', $data );
+
+			foreach ( $parts as &$part ) {
+				if ( '' === $part ) {
+					continue;
+				}
+
+				$key_value = explode( '=', $part, 2 );
+				$key       = rawurldecode( $key_value[0] );
+				$value     = isset( $key_value[1] ) ? rawurldecode( $key_value[1] ) : '';
+
+				if ( 'card.number' === $key ) {
+					$last4 = substr( $value, -4 );
+					$value = '**** **** **** ' . $last4;
+				} elseif ( in_array( $key, [ 'card.cvv', 'authentication.userId', 'authentication.password' ], true ) ) {
+					$value = '***';
+				} else {
+					continue;
+				}
+
+				$part = $key_value[0] . '=' . $value;
+			}
+			unset( $part );
+
+			return implode( '&', $parts );
+		}
+
+		if ( ! is_array( $data ) ) {
+			return $data;
+		}
+
 		$masked = $data;
-	
+
 		if ( isset( $masked['card.number'] ) ) {
 			$last4 = substr( $masked['card.number'], -4 );
 			$masked['card.number'] = '**** **** **** ' . $last4;
 		}
-	
+
 		if ( isset( $masked['card.cvv'] ) ) {
 			$masked['card.cvv'] = '***';
 		}
-	
+
 		if ( isset( $masked['authentication.userId'] ) ) {
 			$masked['authentication.userId'] = '***';
 		}
-	
+
 		if ( isset( $masked['authentication.password'] ) ) {
 			$masked['authentication.password'] = '***';
 		}
-	
+
 		return $masked;
 	}
 
@@ -368,15 +358,16 @@ class PP_Peach_API {
 		$response_body = curl_exec( $ch );
 		$response_code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
 	
-		if ( curl_errno( $ch ) ) {
+		$curl_errno = curl_errno( $ch );
+		if ( $curl_errno ) {
 			$error_message = curl_error( $ch );
 			curl_close( $ch );
 	
 			self::log_error(
-				"cURL error [".curl_errno( $ch )."] while posting to {$endpoint}: {$error_message}",
-				$full_url,
+				"cURL error [{$curl_errno}] while posting to {$endpoint}: {$error_message}",
 				$payload,
-				null
+				null,
+				$full_url
 			);
 	
 			return new WP_Error( 'peach_api_curl_error', $error_message );
@@ -870,6 +861,7 @@ class PP_Peach_API {
 			'paymentBrand'          => [ 'paymentBrand', 'payment_brand' ],
 			'paymentType'           => [ 'paymentType', 'payment_type' ],
 			'card_last4Digits'      => [ 'card_last4Digits', 'card.last4Digits' ],
+			'card_holder'           => [ 'card_holder', 'card.holder' ],
 			'card_expiryMonth'      => [ 'card_expiryMonth', 'card.expiryMonth' ],
 			'card_expiryYear'       => [ 'card_expiryYear', 'card.expiryYear' ],
 		];
@@ -1215,11 +1207,13 @@ class PP_Peach_API {
 			'merchantInvoiceId'     => [ 'merchantInvoiceId', 'merchant_invoice_id', [ 'checkout', 'merchantInvoiceId' ], [ 'payment', 'merchantInvoiceId' ], [ 'payload', 'merchantInvoiceId' ] ],
 			'amount'                => [ 'amount', [ 'checkout', 'amount' ], [ 'payment', 'amount' ], [ 'payload', 'amount' ] ],
 			'currency'              => [ 'currency', [ 'checkout', 'currency' ], [ 'payment', 'currency' ], [ 'payload', 'currency' ] ],
-			'id'                    => [ 'paymentId', 'payment_id', [ 'payment', 'id' ], [ 'payload', 'id' ], [ 'payload', 'paymentId' ], [ 'transaction', 'id' ] ],
-			'registrationId'        => [ 'registrationId', 'registration_id', [ 'payment', 'registrationId' ], [ 'payload', 'registrationId' ] ],
+			'id'                    => [ 'paymentId', 'payment_id', [ 'payment', 'id' ], [ 'payload', 'id' ], [ 'payload', 'paymentId' ], [ 'payload', 'payment', 'id' ], [ 'transaction', 'id' ] ],
+			'registrationId'        => [ 'registrationId', 'registration_id', [ 'payment', 'registrationId' ], [ 'payload', 'registrationId' ], [ 'payload', 'payment', 'registrationId' ] ],
 			'paymentBrand'          => [ 'paymentBrand', 'payment_brand', [ 'payment', 'paymentBrand' ], [ 'payload', 'paymentBrand' ] ],
 			'paymentType'           => [ 'paymentType', 'payment_type', [ 'payment', 'paymentType' ], [ 'payload', 'paymentType' ] ],
+			'payment_initial_id'    => [ 'payment_initial_id', 'cardholderInitiatedTransactionId', [ 'resultDetails', 'CardholderInitiatedTransactionID' ], 'resultDetails.CardholderInitiatedTransactionID', [ 'standingInstruction', 'initialTransactionId' ], 'standingInstruction.initialTransactionId', [ 'payment', 'cardholderInitiatedTransactionId' ], [ 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payment', 'standingInstruction', 'initialTransactionId' ], [ 'payload', 'cardholderInitiatedTransactionId' ], [ 'payload', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payload', 'standingInstruction', 'initialTransactionId' ], [ 'payload', 'payment', 'cardholderInitiatedTransactionId' ], [ 'payload', 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payload', 'payment', 'standingInstruction', 'initialTransactionId' ] ],
 			'card_last4Digits'      => [ 'card_last4Digits', 'card.last4Digits', [ 'card', 'last4Digits' ], [ 'payment', 'card', 'last4Digits' ], [ 'payload', 'card', 'last4Digits' ] ],
+			'card_holder'           => [ 'card_holder', 'card.holder', [ 'card', 'holder' ], [ 'payment', 'card', 'holder' ], [ 'payload', 'card', 'holder' ], [ 'payload', 'payment', 'card', 'holder' ] ],
 			'card_expiryMonth'      => [ 'card_expiryMonth', 'card.expiryMonth', [ 'card', 'expiryMonth' ], [ 'payment', 'card', 'expiryMonth' ], [ 'payload', 'card', 'expiryMonth' ] ],
 			'card_expiryYear'       => [ 'card_expiryYear', 'card.expiryYear', [ 'card', 'expiryYear' ], [ 'payment', 'card', 'expiryYear' ], [ 'payload', 'card', 'expiryYear' ] ],
 		];
@@ -1652,17 +1646,34 @@ class PP_Peach_API {
 			return new WP_Error( 'peach_missing_currency', __( 'Missing Peach Payments currency for order verification.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
-		$expected_amount   = number_format( (float) $order->get_total(), 2, '.', '' );
+		$stored_expected_amount   = trim( (string) $order->get_meta( '_peach_expected_amount', true ) );
+		$stored_expected_currency = trim( (string) $order->get_meta( '_peach_expected_currency', true ) );
+		$live_order_amount        = number_format( (float) $order->get_total(), 2, '.', '' );
+		$live_order_currency      = strtoupper( (string) $order->get_currency() );
+
+		$expected_amount = '' !== $stored_expected_amount
+			? number_format( (float) str_replace( ',', '.', $stored_expected_amount ), 2, '.', '' )
+			: $live_order_amount;
+		$expected_currency = '' !== $stored_expected_currency
+			? strtoupper( sanitize_text_field( $stored_expected_currency ) )
+			: $live_order_currency;
 		$received_amount   = number_format( (float) str_replace( ',', '.', (string) $received_amount ), 2, '.', '' );
-		$expected_currency = strtoupper( (string) $order->get_currency() );
 		$received_currency = strtoupper( sanitize_text_field( (string) $received_currency ) );
 
+		if ( '' !== $stored_expected_amount && $expected_amount !== $live_order_amount ) {
+			PP_Gateway_Logger::info( 'Peach ' . sanitize_key( $context ) . ' verification for order #' . $order->get_id() . ' is using stored checkout amount ' . $expected_amount . ' instead of current order total ' . $live_order_amount . '.' );
+		}
+
 		if ( $expected_amount !== $received_amount ) {
-			return new WP_Error( 'peach_amount_mismatch', __( 'Peach Payments amount did not match the WooCommerce order total.', WC_PEACH_TEXT_DOMAIN ) );
+			$amount_source = '' !== $stored_expected_amount ? '_peach_expected_amount checkout metadata' : 'current WooCommerce order total';
+			PP_Gateway_Logger::error( 'Peach ' . sanitize_key( $context ) . ' amount verification failed for order #' . $order->get_id() . '. Expected ' . $expected_amount . ' from ' . $amount_source . ', received ' . $received_amount . '. Current order total: ' . $live_order_amount . '.' );
+			return new WP_Error( 'peach_amount_mismatch', __( 'Peach Payments amount did not match the expected checkout amount.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
 		if ( $expected_currency !== $received_currency ) {
-			return new WP_Error( 'peach_currency_mismatch', __( 'Peach Payments currency did not match the WooCommerce order currency.', WC_PEACH_TEXT_DOMAIN ) );
+			$currency_source = '' !== $stored_expected_currency ? '_peach_expected_currency checkout metadata' : 'current WooCommerce order currency';
+			PP_Gateway_Logger::error( 'Peach ' . sanitize_key( $context ) . ' currency verification failed for order #' . $order->get_id() . '. Expected ' . $expected_currency . ' from ' . $currency_source . ', received ' . $received_currency . '. Current order currency: ' . $live_order_currency . '.' );
+			return new WP_Error( 'peach_currency_mismatch', __( 'Peach Payments currency did not match the expected checkout currency.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
 		return true;
@@ -1839,7 +1850,7 @@ public static function create_checkout( WC_Order $order ) {
 				],
 				WC_PEACH_SITE_URL
 			),
-			'cancelUrl' => $order->get_cancel_order_url(),
+			'cancelUrl' => $order->get_cancel_order_url_raw(),
 			'merchantInvoiceId' => $order_number,
 			'paymentType' => 'DB',
 			'customer' => [
@@ -1869,6 +1880,12 @@ public static function create_checkout( WC_Order $order ) {
 			$payload['defaultPaymentMethod'] = 'CARD';
 			$payload['forceDefaultMethod']   = true;
 			$payload['createRegistration']   = true;
+
+			// Peach Checkout V2 requires PA + createRegistration for zero-value tokenisation.
+			// Keep normal paid subscription checkouts on the existing DB flow.
+			if ( 0.0 === (float) $total ) {
+				$payload['paymentType'] = 'PA';
+			}
 
 			$si = self::get_standing_instruction_from_order( $order );
 
@@ -1908,7 +1925,13 @@ public static function create_checkout( WC_Order $order ) {
 		$response = WC_Gateway_Peach_Hosted::create_checkout_session( $access_token, $payload );
 	
 		if ( empty( $response['redirectUrl'] ) ) {
-			self::log_error( 'Redirect URL ['.$order_id.']', $payload, $response, '' );
+			$is_subscription_object = function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order );
+			$checkout_type          = $is_subscription_object ? 'subscription payment-method change' : ( $is_subscription ? 'subscription checkout' : 'standard checkout' );
+			$registration_flag      = ! empty( $payload['createRegistration'] ) ? 'true' : 'false';
+			$payment_type            = isset( $payload['paymentType'] ) ? (string) $payload['paymentType'] : 'missing';
+
+			PP_Gateway_Logger::error( 'Peach checkout session creation failed for order #' . $order_id . ' (' . $checkout_type . '): Peach returned no redirect URL. amount=' . number_format( (float) $total, 2, '.', '' ) . ', paymentType=' . $payment_type . ', createRegistration=' . $registration_flag . '. Response: ' . print_r( $response, true ) );
+			self::log_error( 'Checkout session failed for order #' . $order_id . ' (' . $checkout_type . '): no redirect URL returned. amount=' . number_format( (float) $total, 2, '.', '' ) . ', paymentType=' . $payment_type . ', createRegistration=' . $registration_flag . '.', $payload, $response, '' );
 			$order->delete_meta_data( '_peach_return_token' );
 			$order->save();
 			$order->add_order_note( 'Peach API error: No redirect URL returned.' );
@@ -1933,10 +1956,11 @@ public static function create_checkout( WC_Order $order ) {
 	 * @param string   $registration_id The saved card token (registration ID).
 	 * @param WC_Order $order           WooCommerce order object.
 	 * @param float    $amount          Amount to charge.
+	 * @param string   $preferred_payment_initial_id Current subscription initial transaction ID when available.
 	 *
 	 * @return array|WP_Error
 	 */
-	public function charge_saved_card( $registration_id, $order, $amount ) {
+	public function charge_saved_card( $registration_id, $order, $amount, $preferred_payment_initial_id = '' ) {
 		if ( empty( $registration_id ) || ! is_a( $order, 'WC_Order' ) ) {
 			return new WP_Error( 'peach_invalid_data', __( 'Invalid data provided for token charge.', WC_PEACH_TEXT_DOMAIN ) );
 		}
@@ -1972,19 +1996,50 @@ public static function create_checkout( WC_Order $order ) {
 		}else{
 			$parent_order_id = $order_id;
 		}
-		$payment_initial_id = get_post_meta( $order_id, 'payment_initial_id', true );
-		if ( ! empty( $payment_initial_id ) ) {
-			$data .= "&standingInstruction.initialTransactionId=".$payment_initial_id;
-		}else{
-			$entityId = PP_Gateway_Settings::get( 'channel_3ds' );
-			$accessToken = PP_Gateway_Settings::get( 'access_token' );
-			$transactionID = get_post_meta( $parent_order_id, 'payment_order_id', true );
-			
-			$payment_initial_id = $this->getInitialID($accessToken, $entityId, $transactionID);
-			
-			if(!empty($payment_initial_id)){
-				$data .= "&standingInstruction.initialTransactionId=".$payment_initial_id;
+
+		$payment_initial_id = trim( (string) $preferred_payment_initial_id );
+		$initial_id_source  = '' !== $payment_initial_id ? 'subscription_context' : '';
+
+		if ( '' === $payment_initial_id ) {
+			$payment_initial_id = trim( (string) $order->get_meta( 'payment_initial_id', true ) );
+			if ( '' !== $payment_initial_id ) {
+				$initial_id_source = 'renewal_order';
 			}
+		}
+
+		$parent_order = wc_get_order( $parent_order_id );
+		if ( '' === $payment_initial_id && is_a( $parent_order, 'WC_Order' ) ) {
+			$parent_registration_id = trim( (string) $parent_order->get_meta( 'payment_registration_id', true ) );
+			if ( '' === $parent_registration_id ) {
+				$parent_registration_id = trim( (string) $parent_order->get_meta( '_peach_subscription_payment_method', true ) );
+			}
+
+			if ( '' !== $parent_registration_id && $parent_registration_id !== $registration_id ) {
+				PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' skipped parent order COF metadata because the current registration ID differs from the parent registration ID. Current registration: ' . ( strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id ) . '. Parent registration: ' . ( strlen( $parent_registration_id ) > 5 ? '...' . substr( $parent_registration_id, -5 ) : $parent_registration_id ) . '. The renewal will continue without reusing the previous card initial transaction ID.' );
+			} else {
+				$payment_initial_id = trim( (string) $parent_order->get_meta( 'payment_initial_id', true ) );
+				if ( '' !== $payment_initial_id ) {
+					$initial_id_source = 'parent_order';
+				} else {
+					$entityId      = PP_Gateway_Settings::get( 'channel_3ds' );
+					$accessToken   = PP_Gateway_Settings::get( 'access_token' );
+					$transactionID = trim( (string) $parent_order->get_meta( 'payment_order_id', true ) );
+
+					if ( '' !== $transactionID ) {
+						$payment_initial_id = $this->getInitialID( $accessToken, $entityId, $transactionID );
+						if ( ! empty( $payment_initial_id ) ) {
+							$initial_id_source = 'parent_order_query';
+						}
+					}
+				}
+			}
+		}
+
+		if ( ! empty( $payment_initial_id ) ) {
+			$data .= '&standingInstruction.initialTransactionId=' . urlencode( $payment_initial_id );
+			PP_Gateway_Logger::info( 'Peach renewal order #' . $order_id . ' using initial transaction ID from ' . $initial_id_source . ': ' . ( strlen( $payment_initial_id ) > 5 ? '...' . substr( $payment_initial_id, -5 ) : $payment_initial_id ) . '.' );
+		} else {
+			PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' has no resolved payment_initial_id for registration ' . ( strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id ) . '. The recurring request will continue without standingInstruction.initialTransactionId to preserve legacy behaviour.' );
 		}
 	
 		$url = '/v1/registrations/' . urlencode( $registration_id ) . '/payments';
@@ -2040,6 +2095,9 @@ public static function create_checkout( WC_Order $order ) {
 					break;
 				}else if(!empty($record->standingInstruction->initialTransactionId)){
 					$payment_initial_id = $record->standingInstruction->initialTransactionId;
+					break;
+				}else if(!empty($record->cardholderInitiatedTransactionId)){
+					$payment_initial_id = $record->cardholderInitiatedTransactionId;
 					break;
 				}
 			}

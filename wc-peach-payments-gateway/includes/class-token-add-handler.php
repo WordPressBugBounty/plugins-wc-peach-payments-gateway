@@ -18,82 +18,11 @@ class PP_Gateway_Token_Add_Handler {
 	public static function register() {
 		add_action( 'wp_ajax_pp_get_registration_id', [ __CLASS__, 'handle_get_registration_id' ] );
 	
-		// Existing handlers...
-		add_action( 'wp_ajax_pp_save_new_card', [ __CLASS__, 'handle_add_card' ] );
-		add_action( 'wp_ajax_pp_delete_saved_card', [ __CLASS__, 'handle_delete_card' ] );
 		add_action( 'template_redirect', [ 'PP_Gateway_Token_Add_Handler', 'maybe_handle_resource_path' ] );
 	}
 
 
-	/**
-	 * Handles the AJAX request to add a new card.
-	 */
-	public static function handle_add_card() {
-		check_ajax_referer( 'pp_add_card_nonce', 'nonce' );
 
-		if ( ! is_user_logged_in() ) {
-			wp_send_json_error( [ 'message' => __( 'Unauthorized request.', WC_PEACH_TEXT_DOMAIN ) ] );
-		}
-		
-		PP_Gateway_Logger::error( "Add card POST. ".print_r($_POST, true) );
-
-		$user_id = get_current_user_id();
-
-		$card_number = sanitize_text_field( $_POST['card_number'] ?? '' );
-		$exp_month   = sanitize_text_field( $_POST['exp_month'] ?? '' );
-		$exp_year    = sanitize_text_field( $_POST['exp_year'] ?? '' );
-		$cvv         = sanitize_text_field( $_POST['cvv'] ?? '' );
-		$holder      = sanitize_text_field( $_POST['card_holder'] ?? '' );
-
-		if ( empty( $card_number ) || empty( $exp_month ) || empty( $exp_year ) || empty( $cvv ) || empty( $holder ) ) {
-			wp_send_json_error( [ 'message' => __( 'All fields are required.', WC_PEACH_TEXT_DOMAIN ) ] );
-		}
-
-		$api = new PP_Peach_API();
-
-		$response = $api->create_token( [
-			'card_number' => $card_number,
-			'expiry_month' => $exp_month,
-			'expiry_year' => $exp_year,
-			'cvv' => $cvv,
-			'holder' => $holder,
-			'brand' => 'VISA'
-		] );
-
-		if ( is_wp_error( $response ) ) {
-			$error_message = $response->get_error_message();
-			wp_send_json_error( [ 'message' => $error_message ] );
-		}
-
-		$registration_id = $response['id'] ?? null;
-		$masked_number   = $response['masked'] ?? 'xxxx-xxxx';
-		$brand           = $response['brand'] ?? 'Card';
-
-		if ( ! $registration_id ) {
-			wp_send_json_error( [ 'message' => __( 'Failed to store card. No token returned.', WC_PEACH_TEXT_DOMAIN ) ] );
-		}
-
-		// Save card to user meta
-		$card_data = [
-			'id'        => $registration_id,
-			'num'       => $masked_number,
-			'holder'    => $holder,
-			'brand'     => $brand,
-			'exp_month' => $exp_month,
-			'exp_year'  => $exp_year,
-		];
-
-		$cards = get_user_meta( $user_id, 'my-cards', true );
-		if ( ! is_array( $cards ) ) {
-			$cards = [];
-		}
-
-		$cards[] = $card_data;
-		update_user_meta( $user_id, 'my-cards', $cards );
-
-		wp_send_json_success( [ 'message' => __( 'Card added successfully.', WC_PEACH_TEXT_DOMAIN ) ] );
-	}
-	
 	public static function handle_get_registration_id() {
 		if ( ! is_user_logged_in() || ! check_ajax_referer( 'pp_add_card_nonce', 'nonce', false ) ) {
 			wp_send_json_error( [ 'message' => 'Unauthorized.' ], 401 );
@@ -423,6 +352,7 @@ class PP_Gateway_Token_Add_Handler {
 			'id'                    => [ 'paymentId', 'payment_id', [ 'payment', 'id' ], [ 'payload', 'paymentId' ], [ 'payload', 'payment', 'id' ], [ 'transaction', 'id' ] ],
 			'registrationId'        => [ 'registrationId', 'registration_id', [ 'registration', 'id' ], [ 'payment', 'registrationId' ], [ 'payment', 'registration', 'id' ], [ 'payload', 'registrationId' ], [ 'payload', 'registration', 'id' ], [ 'payload', 'payment', 'registrationId' ], [ 'payload', 'payment', 'registration', 'id' ] ],
 			'paymentBrand'          => [ 'paymentBrand', 'payment_brand', [ 'payment', 'paymentBrand' ], [ 'payload', 'paymentBrand' ], [ 'payload', 'payment', 'paymentBrand' ] ],
+			'payment_initial_id'    => [ 'payment_initial_id', 'cardholderInitiatedTransactionId', [ 'resultDetails', 'CardholderInitiatedTransactionID' ], 'resultDetails.CardholderInitiatedTransactionID', [ 'standingInstruction', 'initialTransactionId' ], 'standingInstruction.initialTransactionId', [ 'payment', 'cardholderInitiatedTransactionId' ], [ 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payment', 'standingInstruction', 'initialTransactionId' ], [ 'payload', 'cardholderInitiatedTransactionId' ], [ 'payload', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payload', 'standingInstruction', 'initialTransactionId' ], [ 'payload', 'payment', 'cardholderInitiatedTransactionId' ], [ 'payload', 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payload', 'payment', 'standingInstruction', 'initialTransactionId' ] ],
 			'card_last4Digits'      => [ 'card_last4Digits', 'card.last4Digits', [ 'card', 'last4Digits' ], [ 'payment', 'card', 'last4Digits' ], [ 'payload', 'card', 'last4Digits' ], [ 'payload', 'payment', 'card', 'last4Digits' ] ],
 			'card_holder'           => [ 'card_holder', 'card.holder', [ 'card', 'holder' ], [ 'payment', 'card', 'holder' ], [ 'payload', 'card', 'holder' ], [ 'payload', 'payment', 'card', 'holder' ] ],
 			'card_expiryMonth'      => [ 'card_expiryMonth', 'card.expiryMonth', [ 'card', 'expiryMonth' ], [ 'payment', 'card', 'expiryMonth' ], [ 'payload', 'card', 'expiryMonth' ], [ 'payload', 'payment', 'card', 'expiryMonth' ] ],
@@ -508,11 +438,12 @@ class PP_Gateway_Token_Add_Handler {
 	/**
 	 * Remove a pending add-card checkout after it has been saved or rejected.
 	 *
-	 * @param int   $user_id  WordPress user ID.
-	 * @param array $expected Expected checkout metadata.
+	 * @param int   $user_id             WordPress user ID.
+	 * @param array $expected            Expected checkout metadata.
+	 * @param bool  $delete_return_token Whether to delete the browser return-token transient.
 	 * @return void
 	 */
-	private static function remove_pending_card_checkout( $user_id, array $expected ) {
+	private static function remove_pending_card_checkout( $user_id, array $expected, $delete_return_token = true ) {
 		$user_id      = absint( $user_id );
 		$checkout_id  = ! empty( $expected['checkout_id'] ) ? sanitize_text_field( (string) $expected['checkout_id'] ) : '';
 		$merchant_id  = ! empty( $expected['merchant_transaction_id'] ) ? sanitize_text_field( (string) $expected['merchant_transaction_id'] ) : '';
@@ -542,7 +473,7 @@ class PP_Gateway_Token_Add_Handler {
 			delete_transient( self::get_card_merchant_transient_key( $merchant_id ) );
 		}
 
-		if ( $user_id && '' !== $return_token ) {
+		if ( $delete_return_token && $user_id && '' !== $return_token ) {
 			delete_transient( self::get_card_return_transient_key( $user_id, $return_token ) );
 		}
 	}
@@ -641,18 +572,24 @@ class PP_Gateway_Token_Add_Handler {
 		$brand  = self::get_first_response_value( $response, [ 'paymentBrand', 'payment_brand', [ 'payment', 'paymentBrand' ], [ 'payload', 'paymentBrand' ], [ 'payload', 'payment', 'paymentBrand' ] ] );
 		$month  = self::get_first_response_value( $response, [ [ 'card', 'expiryMonth' ], 'card_expiryMonth', 'card.expiryMonth', [ 'payment', 'card', 'expiryMonth' ], [ 'payload', 'card', 'expiryMonth' ], [ 'payload', 'payment', 'card', 'expiryMonth' ] ] );
 		$year   = self::get_first_response_value( $response, [ [ 'card', 'expiryYear' ], 'card_expiryYear', 'card.expiryYear', [ 'payment', 'card', 'expiryYear' ], [ 'payload', 'card', 'expiryYear' ], [ 'payload', 'payment', 'card', 'expiryYear' ] ] );
+		$payment_initial_id = self::get_first_response_value( $response, [ 'payment_initial_id', 'cardholderInitiatedTransactionId', [ 'resultDetails', 'CardholderInitiatedTransactionID' ], 'resultDetails.CardholderInitiatedTransactionID', [ 'standingInstruction', 'initialTransactionId' ], 'standingInstruction.initialTransactionId', [ 'payment', 'cardholderInitiatedTransactionId' ], [ 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payment', 'standingInstruction', 'initialTransactionId' ], [ 'payload', 'cardholderInitiatedTransactionId' ], [ 'payload', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payload', 'standingInstruction', 'initialTransactionId' ], [ 'payload', 'payment', 'cardholderInitiatedTransactionId' ], [ 'payload', 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ], [ 'payload', 'payment', 'standingInstruction', 'initialTransactionId' ] ] );
+		$payment_order_id   = self::get_first_response_value( $response, [ 'id', 'paymentId', 'payment_id', [ 'payment', 'id' ], [ 'payload', 'id' ], [ 'payload', 'paymentId' ], [ 'payload', 'payment', 'id' ] ] );
 
 		PP_Gateway_Card_Manager::save_card( $user_id, [
-			'id'        => $registration_id,
-			'num'       => 'xxxx-' . sanitize_text_field( (string) $last4 ),
-			'holder'    => sanitize_text_field( (string) $holder ),
-			'brand'     => sanitize_text_field( (string) $brand ),
-			'exp_year'  => sanitize_text_field( (string) $year ),
-			'exp_month' => sanitize_text_field( (string) $month ),
+			'id'                 => $registration_id,
+			'num'                => 'xxxx-' . sanitize_text_field( (string) $last4 ),
+			'holder'             => sanitize_text_field( (string) $holder ),
+			'brand'              => sanitize_text_field( (string) $brand ),
+			'exp_year'           => sanitize_text_field( (string) $year ),
+			'exp_month'          => sanitize_text_field( (string) $month ),
+			'payment_initial_id' => sanitize_text_field( (string) $payment_initial_id ),
+			'payment_order_id'   => sanitize_text_field( (string) $payment_order_id ),
 		] );
 
-		self::remove_pending_card_checkout( $user_id, $expected );
-		PP_Gateway_Logger::info( 'Peach add-card saved card for user #' . $user_id . ' from ' . sanitize_text_field( (string) $source ) . '. Registration ID: ' . $registration_id );
+		// Webhook/status reconciliation may complete before the shopper returns from Peach.
+		// Preserve the return-token transient so that the browser return can still be verified.
+		self::remove_pending_card_checkout( $user_id, $expected, false );
+		PP_Gateway_Logger::info( 'Peach add-card saved card for user #' . $user_id . ' from ' . sanitize_text_field( (string) $source ) . '. Registration ID: ' . $registration_id . '. Browser return token preserved for return verification.' );
 
 		return true;
 	}
@@ -808,7 +745,7 @@ class PP_Gateway_Token_Add_Handler {
 		$expected      = get_transient( $transient_key );
 
 		if ( ! is_array( $expected ) || empty( $expected['merchant_transaction_id'] ) || (int) $expected['user_id'] !== (int) $user_id ) {
-			PP_Gateway_Logger::warning( 'Peach add-card return rejected for user #' . $user_id . ': return token missing or expired.' );
+			PP_Gateway_Logger::error( 'Peach add-card return rejected for user #' . $user_id . ': the browser return token is missing, expired, or does not match a valid pending add-card session, so the return cannot be verified.' );
 			wc_add_notice( __( 'Card registration could not be verified. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
 			wp_safe_redirect( wc_get_account_endpoint_url( 'my-cards' ) );
 			exit;
@@ -941,12 +878,14 @@ class PP_Gateway_Token_Add_Handler {
 
 			// Save card data to user_meta only after the Peach result has been verified server-to-server.
 			PP_Gateway_Card_Manager::save_card( $user_id, [
-				'id'        => $registration_id,
-				'num'       => 'xxxx-' . sanitize_text_field( $response['card']['last4Digits'] ?? '' ),
-				'holder'    => sanitize_text_field( $response['card']['holder'] ?? '' ),
-				'brand'     => sanitize_text_field( $response['paymentBrand'] ?? '' ),
-				'exp_year'  => sanitize_text_field( $response['card']['expiryYear'] ?? '' ),
-				'exp_month' => sanitize_text_field( $response['card']['expiryMonth'] ?? '' ),
+				'id'                 => $registration_id,
+				'num'                => 'xxxx-' . sanitize_text_field( $response['card']['last4Digits'] ?? '' ),
+				'holder'             => sanitize_text_field( $response['card']['holder'] ?? '' ),
+				'brand'              => sanitize_text_field( $response['paymentBrand'] ?? '' ),
+				'exp_year'           => sanitize_text_field( $response['card']['expiryYear'] ?? '' ),
+				'exp_month'          => sanitize_text_field( $response['card']['expiryMonth'] ?? '' ),
+				'payment_initial_id' => sanitize_text_field( $response['payment_initial_id'] ?? '' ),
+				'payment_order_id'   => sanitize_text_field( $response['id'] ?? '' ),
 			] );
 			self::remove_pending_card_checkout( $user_id, $expected );
 			delete_transient( $transient_key );

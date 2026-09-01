@@ -512,6 +512,131 @@ class PP_Gateway_Order_Utils {
 		$order->save();
 	}
 	
+	/**
+	 * Store a new registration ID for a verified zero-value subscription registration checkout.
+	 *
+	 * This is intentionally limited to subscription sessions whose checkout-time expected amount
+	 * was 0.00, so normal paid checkouts and renewal payment metadata remain unchanged.
+	 *
+	 * @param WC_Order $order           Order/subscription object.
+	 * @param string   $registration_id Peach registration ID.
+	 * @param string   $source          Processing source for logging.
+	 * @param string   $payment_initial_id Initial transaction ID belonging to the new registration, when returned.
+	 * @param string   $payment_order_id   Peach payment/transaction ID belonging to the new registration, when returned.
+	 * @return bool True when this was a zero-value subscription registration checkout.
+	 */
+	public static function maybe_store_zero_value_subscription_registration( WC_Order $order, $registration_id, $source = '', $payment_initial_id = '', $payment_order_id = '' ) {
+		$registration_id = trim( (string) $registration_id );
+		if ( '' === $registration_id || ! self::is_subscription( $order ) ) {
+			return false;
+		}
+
+		$stored_expected_amount = trim( (string) $order->get_meta( '_peach_expected_amount', true ) );
+		if ( '' === $stored_expected_amount || '0.00' !== number_format( (float) str_replace( ',', '.', $stored_expected_amount ), 2, '.', '' ) ) {
+			return false;
+		}
+
+		$previous_registration_id = trim( (string) $order->get_meta( 'payment_registration_id', true ) );
+		$previous_initial_id      = trim( (string) $order->get_meta( 'payment_initial_id', true ) );
+		$previous_payment_order_id = trim( (string) $order->get_meta( 'payment_order_id', true ) );
+		$payment_initial_id       = trim( (string) $payment_initial_id );
+		$payment_order_id         = trim( (string) $payment_order_id );
+
+		$order->update_meta_data( 'payment_registration_id', $registration_id );
+		$order->update_meta_data( '_peach_subscription_payment_method', $registration_id );
+
+		if ( '' !== $payment_initial_id ) {
+			$order->update_meta_data( 'payment_initial_id', $payment_initial_id );
+		} elseif ( $previous_registration_id !== $registration_id && '' !== $previous_initial_id ) {
+			$order->delete_meta_data( 'payment_initial_id' );
+			PP_Gateway_Logger::warning( 'Peach Payments cleared the previous payment_initial_id for order #' . $order->get_id() . ' because the registration ID changed but the verified response did not contain the new card initial transaction ID.' );
+		}
+
+		if ( '' !== $payment_order_id ) {
+			$order->update_meta_data( 'payment_order_id', $payment_order_id );
+		} elseif ( $previous_registration_id !== $registration_id && '' !== $previous_payment_order_id ) {
+			$order->delete_meta_data( 'payment_order_id' );
+			PP_Gateway_Logger::warning( 'Peach Payments cleared the previous payment_order_id for order #' . $order->get_id() . ' because the registration ID changed but the verified response did not contain the new Peach payment ID.' );
+		}
+
+		if ( $previous_registration_id !== $registration_id ) {
+			$previous_masked = '' === $previous_registration_id ? 'none' : ( strlen( $previous_registration_id ) > 5 ? '...' . substr( $previous_registration_id, -5 ) : $previous_registration_id );
+			$new_masked      = strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id;
+			$source_label    = '' !== trim( (string) $source ) ? sanitize_key( $source ) : 'verified_return';
+
+			PP_Gateway_Logger::info( 'Peach Payments zero-value subscription registration updated for order #' . $order->get_id() . ' via ' . $source_label . '. Previous registration ID: ' . $previous_masked . '. New registration ID: ' . $new_masked . '.' );
+		}
+
+		return true;
+	}
+
+	/**
+	 * Persist a verified registration in My Cards without creating duplicate rows.
+	 * Existing rows are only enriched where card display fields are currently blank.
+	 *
+	 * @param WC_Order $order           Order/subscription object.
+	 * @param string   $registration_id Peach registration ID.
+	 * @param array    $response         Verified Peach response with normalised card fields.
+	 * @param string   $source           Processing source for logging.
+	 * @return bool True when My Cards storage was applicable.
+	 */
+	public static function maybe_save_registration_to_user_cards( WC_Order $order, $registration_id, array $response, $source = '' ) {
+		$registration_id = trim( (string) $registration_id );
+		$user_id         = (int) $order->get_user_id();
+
+		if ( '' === $registration_id || $user_id <= 0 || PP_Gateway_Settings::get( 'card_storage' ) !== 'yes' ) {
+			return false;
+		}
+
+		$last4 = sanitize_text_field( (string) ( $response['card_last4Digits'] ?? '' ) );
+		$card_data = [
+			'id'                 => $registration_id,
+			'num'                => '' !== $last4 ? 'xxxx-' . $last4 : '',
+			'holder'             => sanitize_text_field( (string) ( $response['card_holder'] ?? '' ) ),
+			'brand'              => sanitize_text_field( (string) ( $response['paymentBrand'] ?? '' ) ),
+			'exp_month'          => sanitize_text_field( (string) ( $response['card_expiryMonth'] ?? '' ) ),
+			'exp_year'           => sanitize_text_field( (string) ( $response['card_expiryYear'] ?? '' ) ),
+			'payment_initial_id' => sanitize_text_field( (string) ( $response['payment_initial_id'] ?? '' ) ),
+			'payment_order_id'   => sanitize_text_field( (string) ( $response['id'] ?? ( $response['payment_order_id'] ?? '' ) ) ),
+		];
+
+		$cards = get_user_meta( $user_id, 'my-cards', true );
+		if ( ! is_array( $cards ) ) {
+			$cards = [];
+		}
+
+		foreach ( $cards as $index => $existing_card ) {
+			if ( ! isset( $existing_card['id'] ) || (string) $existing_card['id'] !== $registration_id ) {
+				continue;
+			}
+
+			$updated = false;
+			foreach ( [ 'num', 'holder', 'brand', 'exp_month', 'exp_year', 'payment_initial_id', 'payment_order_id' ] as $field ) {
+				if ( empty( $existing_card[ $field ] ) && ! empty( $card_data[ $field ] ) ) {
+					$cards[ $index ][ $field ] = $card_data[ $field ];
+					$updated = true;
+				}
+			}
+
+			if ( $updated ) {
+				update_user_meta( $user_id, 'my-cards', $cards );
+				PP_Gateway_Logger::info( 'Peach My Cards entry enriched for user #' . $user_id . ' from ' . sanitize_key( $source ) . ' without creating a duplicate registration row.' );
+			}
+
+			return true;
+		}
+
+		if ( class_exists( 'PP_Gateway_Card_Manager' ) ) {
+			PP_Gateway_Card_Manager::save_card( $user_id, $card_data );
+		} else {
+			$cards[] = $card_data;
+			update_user_meta( $user_id, 'my-cards', $cards );
+		}
+
+		PP_Gateway_Logger::info( 'Peach registration saved to My Cards for user #' . $user_id . ' from ' . sanitize_key( $source ) . '. Registration ID: ' . ( strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id ) . '.' );
+		return true;
+	}
+
 	public static function handle_payment_status( WC_Order $order, array $response ) {
 		$response = wp_unslash( $response );
 
@@ -537,21 +662,36 @@ class PP_Gateway_Order_Utils {
 		$transaction_id  = isset( $response['id'] ) ? sanitize_text_field( $response['id'] ) : '';
 		$registration_id = isset( $response['registrationId'] ) ? sanitize_text_field( $response['registrationId'] ) : '';
 
-		$InitiatedTransactionID = '';
-		if ( isset( $response['resultDetails']['CardholderInitiatedTransactionID'] ) ) {
+		$InitiatedTransactionID = isset( $response['payment_initial_id'] ) ? sanitize_text_field( (string) $response['payment_initial_id'] ) : '';
+		if ( '' === $InitiatedTransactionID && ! empty( $response['cardholderInitiatedTransactionId'] ) ) {
+			$InitiatedTransactionID = sanitize_text_field( (string) $response['cardholderInitiatedTransactionId'] );
+		}
+		if ( '' === $InitiatedTransactionID && ! empty( $response['resultDetails']['CardholderInitiatedTransactionID'] ) ) {
 			$InitiatedTransactionID = sanitize_text_field( $response['resultDetails']['CardholderInitiatedTransactionID'] );
-		} elseif ( isset( $response['standingInstruction']['initialTransactionId'] ) ) {
+		}
+		if ( '' === $InitiatedTransactionID && ! empty( $response['standingInstruction']['initialTransactionId'] ) ) {
 			$InitiatedTransactionID = sanitize_text_field( $response['standingInstruction']['initialTransactionId'] );
 		}
 
-		$order->update_meta_data( 'payment_initial_id', $InitiatedTransactionID );
+		if ( '' !== $InitiatedTransactionID ) {
+			$order->update_meta_data( 'payment_initial_id', $InitiatedTransactionID );
+		}
 
 		// Save to order meta (if not already stored)
 		if ( $transaction_id && ! metadata_exists( 'post', $order->get_id(), 'payment_order_id' ) ) {
 			$order->update_meta_data( 'payment_order_id', $transaction_id );
 		}
-		if ( $registration_id && ! metadata_exists( 'post', $order->get_id(), 'payment_registration_id' ) ) {
-			$order->update_meta_data( 'payment_registration_id', $registration_id );
+		if ( $registration_id ) {
+			$zero_value_subscription_registration = self::is_successful_result_code( $status_code )
+				&& self::maybe_store_zero_value_subscription_registration( $order, $registration_id, 'hosted_return', $InitiatedTransactionID, $transaction_id );
+
+			if ( $zero_value_subscription_registration ) {
+				self::maybe_save_registration_to_user_cards( $order, $registration_id, $response, 'hosted_return' );
+			}
+
+			if ( ! $zero_value_subscription_registration && ! metadata_exists( 'post', $order->get_id(), 'payment_registration_id' ) ) {
+				$order->update_meta_data( 'payment_registration_id', $registration_id );
+			}
 		}
 
 		// Determine order status based on result code
@@ -604,12 +744,14 @@ class PP_Gateway_Order_Utils {
 
 						if(empty($user_tokens) || !in_array($registration_id,$user_tokens)){
 							$card_data = [
-								'id'        => $registration_id,
-								'num'       => 'xxxx-' . ( $response['card_last4Digits'] ?? '' ),
-								'holder'    => $response['card_holder'] ?? '',
-								'brand'     => $response['paymentBrand'] ?? '',
-								'exp_month' => $response['card_expiryMonth'] ?? '',
-								'exp_year'  => $response['card_expiryYear'] ?? '',
+								'id'                 => $registration_id,
+								'num'                => 'xxxx-' . ( $response['card_last4Digits'] ?? '' ),
+								'holder'             => $response['card_holder'] ?? '',
+								'brand'              => $response['paymentBrand'] ?? '',
+								'exp_month'          => $response['card_expiryMonth'] ?? '',
+								'exp_year'           => $response['card_expiryYear'] ?? '',
+								'payment_initial_id' => $InitiatedTransactionID,
+								'payment_order_id'   => $transaction_id,
 							];
 
 							$cards = get_user_meta( $user_id, 'my-cards', true );
@@ -754,7 +896,11 @@ class PP_Gateway_Order_Utils {
 	}
 	
 	public static function is_subscription( $order ) {
-		return function_exists( 'wcs_order_contains_subscription' ) && wcs_order_contains_subscription( $order );
+		if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order ) ) {
+			return true;
+		}
+
+		return function_exists( 'wcs_order_contains_subscription' ) && wcs_order_contains_subscription( $order, 'any' );
 	}
 
 	public static function is_renewal( $order ) {

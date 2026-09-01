@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.8
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.0.7
-Version: 4.0.7
+Stable tag: 4.0.8
+Version: 4.0.8
 License: GPLv3
 
 
@@ -44,6 +44,18 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 4.0.8 =
+  * Fix - Zero value add card and change payment sessions could miss a valid payment_initial_id when an earlier response field existed but was empty. Extraction now skips empty values and continues with valid Peach CIT fields, including the top level cardholderInitiatedTransactionId.
+  * Fix - The checkout Cancel URL was HTML escaped before being sent to Peach. The plugin now sends WooCommerce's raw gateway cancel URL so cancel requests process correctly.
+  * Fix - Adding a card from My Cards could fail with "token missing or expired" or a false verification error if the Peach webhook completed before the customer returned. The return token is now preserved. Existing saved card records can be updated with missing details instead of being treated as duplicates.
+  * Fix - Subscription payment method changes could fail on zero value Peach sessions. Registration and payment settings, subscription detection, and return validation for the original amount and currency are corrected so the new card replaces the old one for future renewals.
+  * Fix - HPOS: subscription flows now use WooCommerce CRUD metadata instead of direct post meta checks.
+  * Fix - Card deletion could miss cards linked to subscriptions, including HPOS. Cards linked to active, pending, or on hold subscriptions cannot be deleted until the subscription is moved to another card. Unused cards can still be deleted. Customers see which subscriptions are affected and are directed to Change Card.
+  * Tweak - Prevent stale initial transaction IDs from an old card being paired with a newly selected registration on renewals.
+  * Tweak - Added V2 card holder name normalisation so holder details are saved when adding a card.
+  * Tweak - Clearer Peach and WooCommerce logs for failed session creation, return validation, card registration, credential changes, renewal mismatches, and blocked or failed card deletion.
+  * Tweak - Removed unused duplicate class-order-utils.php.
 
 = 4.0.7 =
   * Fix - Valid Peach payment returns are no longer rejected when the local return token or checkout ID has changed after a refresh, retry, or new payment session. Signature validation now runs first for signed results.

@@ -908,6 +908,25 @@ class PP_Gateway_Webhook_Handler {
 				'registrationId',
 			]
 		);
+		$paymentInitialId = self::get_webhook_value(
+			$data,
+			[
+				[ 'payload', 'cardholderInitiatedTransactionId' ],
+				'cardholderInitiatedTransactionId',
+				[ 'payload', 'payment', 'cardholderInitiatedTransactionId' ],
+				[ 'payment', 'cardholderInitiatedTransactionId' ],
+				[ 'payload', 'resultDetails', 'CardholderInitiatedTransactionID' ],
+				[ 'resultDetails', 'CardholderInitiatedTransactionID' ],
+				'resultDetails.CardholderInitiatedTransactionID',
+				[ 'payload', 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ],
+				[ 'payment', 'resultDetails', 'CardholderInitiatedTransactionID' ],
+				[ 'payload', 'standingInstruction', 'initialTransactionId' ],
+				[ 'standingInstruction', 'initialTransactionId' ],
+				'standingInstruction.initialTransactionId',
+				[ 'payload', 'payment', 'standingInstruction', 'initialTransactionId' ],
+				[ 'payment', 'standingInstruction', 'initialTransactionId' ],
+			]
+		);
 
 		if ( empty( $merchantTransactionId ) ) {
 			return ['log_type' => 'error', 'log_msg' => 'invalid webhook payload', 'log_txt' => 'Invalid webhook payload'];
@@ -920,7 +939,7 @@ class PP_Gateway_Webhook_Handler {
 			if ( class_exists( 'PP_Gateway_Token_Add_Handler' ) && method_exists( 'PP_Gateway_Token_Add_Handler', 'handle_add_card_webhook' ) ) {
 				$card_webhook_result = PP_Gateway_Token_Add_Handler::handle_add_card_webhook( $data );
 				if ( is_wp_error( $card_webhook_result ) ) {
-					PP_Gateway_Logger::warning( 'Peach add-card webhook acknowledged but card was not saved for reference ' . $merchantTransactionId . ': ' . $card_webhook_result->get_error_message() );
+					PP_Gateway_Logger::error( 'Peach add-card webhook could not save the card for reference ' . $merchantTransactionId . ': ' . $card_webhook_result->get_error_message() );
 				}
 			}
 
@@ -984,8 +1003,29 @@ class PP_Gateway_Webhook_Handler {
 		if ( ! empty( $payment_order_id ) ) {
 			$order->update_meta_data( 'payment_order_id', $payment_order_id );
 		}
+		if ( ! empty( $paymentInitialId ) ) {
+			$order->update_meta_data( 'payment_initial_id', sanitize_text_field( (string) $paymentInitialId ) );
+		}
 		if ( ! empty( $registrationId ) ) {
-			$order->update_meta_data( 'payment_registration_id', $registrationId );
+			$zero_value_subscription_registration = $is_successful_result
+				&& PP_Gateway_Order_Utils::maybe_store_zero_value_subscription_registration( $order, $registrationId, 'webhook', $paymentInitialId, $payment_order_id );
+
+			if ( $zero_value_subscription_registration ) {
+				$card_response = [
+					'card_last4Digits' => self::get_webhook_value( $data, [ [ 'payload', 'card', 'last4Digits' ], [ 'card', 'last4Digits' ], 'card.last4Digits', 'card_last4Digits' ] ),
+					'card_holder'      => self::get_webhook_value( $data, [ [ 'payload', 'card', 'holder' ], [ 'payload', 'payment', 'card', 'holder' ], [ 'card', 'holder' ], 'card.holder', 'card_holder' ] ),
+					'paymentBrand'     => self::get_webhook_value( $data, [ [ 'payload', 'paymentBrand' ], [ 'payment', 'paymentBrand' ], 'paymentBrand', 'payment_brand' ] ),
+					'card_expiryMonth' => self::get_webhook_value( $data, [ [ 'payload', 'card', 'expiryMonth' ], [ 'card', 'expiryMonth' ], 'card.expiryMonth', 'card_expiryMonth' ] ),
+					'card_expiryYear'  => self::get_webhook_value( $data, [ [ 'payload', 'card', 'expiryYear' ], [ 'card', 'expiryYear' ], 'card.expiryYear', 'card_expiryYear' ] ),
+					'payment_initial_id' => sanitize_text_field( (string) $paymentInitialId ),
+					'payment_order_id'   => sanitize_text_field( (string) $payment_order_id ),
+				];
+				PP_Gateway_Order_Utils::maybe_save_registration_to_user_cards( $order, $registrationId, $card_response, 'webhook' );
+			}
+
+			if ( ! $zero_value_subscription_registration ) {
+				$order->update_meta_data( 'payment_registration_id', $registrationId );
+			}
 		}
 		
 		if( $is_successful_result ){

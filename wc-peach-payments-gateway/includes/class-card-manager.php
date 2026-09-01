@@ -37,9 +37,25 @@ class PP_Gateway_Card_Manager {
 	public static function save_card( $user_id, $card_data ) {
 		$cards = self::get_saved_cards( $user_id );
 
-		// Prevent saving duplicate registrationId
-		foreach ( $cards as $card ) {
+		// Prevent duplicate registrationId rows while allowing an existing card to be enriched.
+		foreach ( $cards as $index => $card ) {
 			if ( isset( $card['id'] ) && $card['id'] === $card_data['id'] ) {
+				$updated = false;
+
+				foreach ( [ 'num', 'holder', 'brand', 'exp_month', 'exp_year', 'payment_initial_id', 'payment_order_id' ] as $field ) {
+					if ( empty( $cards[ $index ][ $field ] ) && ! empty( $card_data[ $field ] ) ) {
+						$cards[ $index ][ $field ] = $card_data[ $field ];
+						$updated = true;
+					}
+				}
+
+				if ( $updated ) {
+					update_user_meta( $user_id, self::META_KEY, $cards );
+					if ( class_exists( 'PP_Gateway_Logger' ) ) {
+						PP_Gateway_Logger::info( 'Peach My Cards entry enriched for user #' . $user_id . ' without creating a duplicate registration row.' );
+					}
+				}
+
 				return;
 			}
 		}
