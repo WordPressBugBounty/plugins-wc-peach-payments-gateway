@@ -8,6 +8,62 @@
 defined( 'ABSPATH' ) || exit;
 
 class PP_Gateway_Order_Utils {
+	/** @var array<string,string> Runtime lock ownership tokens held by this request. */
+	protected static $runtime_lock_tokens = [];
+
+	/** Acquire an atomic, stale-takeover runtime lock in wp_options. */
+	public static function acquire_runtime_lock( $key, $ttl = 300 ) {
+		global $wpdb;
+		$key = sanitize_key( (string) $key );
+		if ( '' === $key || ! isset( $wpdb->options ) ) { return false; }
+		$token = wp_generate_uuid4();
+		$now = time();
+		$value = $now . '|' . $token;
+		$inserted = 1 === (int) $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'off')", $key, $value ) );
+		if ( ! $inserted ) {
+			$cutoff = $now - absint( $ttl );
+			$inserted = 1 === (int) $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s, autoload = 'off' WHERE option_name = %s AND CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) < %d", $value, $key, $cutoff ) );
+		}
+		wp_cache_delete( $key, 'options' );
+		wp_cache_delete( 'notoptions', 'options' );
+		if ( $inserted ) { self::$runtime_lock_tokens[ $key ] = $token; }
+		return $inserted;
+	}
+
+	/** Release a runtime lock only when this request still owns it. */
+	public static function release_runtime_lock( $key ) {
+		global $wpdb;
+		$key = sanitize_key( (string) $key );
+		$token = self::$runtime_lock_tokens[ $key ] ?? '';
+		if ( '' === $key || '' === $token || ! isset( $wpdb->options ) ) { return; }
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND SUBSTRING_INDEX(option_value, '|', -1) = %s", $key, $token ) );
+		unset( self::$runtime_lock_tokens[ $key ] );
+		wp_cache_delete( $key, 'options' );
+		wp_cache_delete( 'notoptions', 'options' );
+	}
+
+	/** Reload an order from its active WooCommerce datastore, bypassing in-request caches. */
+	public static function get_fresh_order( $order_id ) {
+		$order_id = absint( $order_id );
+		if ( ! $order_id ) { return false; }
+
+		if ( class_exists( '\\Automattic\WooCommerce\Utilities\OrderUtil' )
+			&& method_exists( '\\Automattic\WooCommerce\Utilities\OrderUtil', 'orders_cache_usage_is_enabled' )
+			&& \Automattic\WooCommerce\Utilities\OrderUtil::orders_cache_usage_is_enabled()
+			&& function_exists( 'wc_get_container' )
+			&& class_exists( '\\Automattic\WooCommerce\Caches\OrderCache' ) ) {
+			try {
+				wc_get_container()->get( \Automattic\WooCommerce\Caches\OrderCache::class )->remove( $order_id );
+			} catch ( Throwable $e ) {
+				// Continue with the normal datastore reload on WooCommerce versions without this cache service.
+			}
+		}
+
+		clean_post_cache( $order_id );
+		$order = wc_get_order( $order_id );
+		if ( $order && method_exists( $order, 'read_meta_data' ) ) { $order->read_meta_data( true ); }
+		return $order;
+	}
 	/**
 	 * Find WooCommerce order ID or sequential order number.
 	 *
@@ -81,6 +137,8 @@ class PP_Gateway_Order_Utils {
 
 		$meta_keys = [
 			'_peach_expected_merchant_transaction_id',
+			'_peach_renewal_attempt_reference',
+			'_peach_renewal_payment_unknown_reference',
 			'_order_number',
 			'_order_number_formatted',
 			'_alg_wc_full_custom_order_number',
@@ -179,9 +237,13 @@ class PP_Gateway_Order_Utils {
 	}
 	
 	public static function convertSequentialNumber( $order_identifier, $key ) {
-		$all_meta = get_post_meta( $order_identifier );
-		$order_number = get_post_meta( $order_identifier, $key, true );
-		return !empty( $order_number ?? null ) ? $order_number : $order_identifier;
+		$order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_identifier ) : false;
+		if ( ! $order ) {
+			return $order_identifier;
+		}
+
+		$order_number = $order->get_meta( $key, true );
+		return ! empty( $order_number ) ? $order_number : $order_identifier;
 	}
 	
 	/**
@@ -259,38 +321,12 @@ class PP_Gateway_Order_Utils {
 	 * @return bool
 	 */
 	public static function acquire_initial_payment_lock( WC_Order $order ) {
-		if ( ! is_a( $order, 'WC_Order' ) ) {
-			return false;
-		}
-
-		$order_id  = $order->get_id();
-		$lock_key  = '_peach_initial_payment_lock';
-		$lock_time = get_post_meta( $order_id, $lock_key, true );
-
-		if ( ! empty( $lock_time ) ) {
-			$lock_age = time() - absint( $lock_time );
-			if ( $lock_age < 300 ) {
-				return false;
-			}
-
-			delete_post_meta( $order_id, $lock_key );
-		}
-
-		return (bool) add_post_meta( $order_id, $lock_key, time(), true );
+		return self::acquire_runtime_lock( '_peach_initial_payment_lock_' . $order->get_id(), 300 );
 	}
 
-	/**
-	 * Release the initial-payment processing lock.
-	 *
-	 * @param WC_Order $order WooCommerce order.
-	 * @return void
-	 */
+	/** Release the initial-payment processing lock. */
 	public static function release_initial_payment_lock( WC_Order $order ) {
-		if ( ! is_a( $order, 'WC_Order' ) ) {
-			return;
-		}
-
-		delete_post_meta( $order->get_id(), '_peach_initial_payment_lock' );
+		self::release_runtime_lock( '_peach_initial_payment_lock_' . $order->get_id() );
 	}
 
 	/**
@@ -405,16 +441,16 @@ class PP_Gateway_Order_Utils {
 		$transaction_id  = isset( $response['id'] ) ? sanitize_text_field( $response['id'] ) : '';
 		$registration_id = isset( $response['registrationId'] ) ? sanitize_text_field( $response['registrationId'] ) : '';
 	
-		// Save to order meta (if not already stored)
-		if ( $transaction_id && ! metadata_exists( 'post', $order->get_id(), 'payment_order_id' ) ) {
-			$order->update_meta_data( 'payment_order_id', $transaction_id );
-		}
-		if ( $registration_id && ! metadata_exists( 'post', $order->get_id(), 'payment_registration_id' ) ) {
-			$order->update_meta_data( 'payment_registration_id', $registration_id );
-		}
-	
-		// Determine order status based on result code
+		// Determine order status based on result code. Transaction identity is written
+		// only after Peach has confirmed success; pending/failed attempts must never
+		// replace the transaction that actually paid this order.
 		if ( self::is_successful_result_code( $status_code ) ) {
+			if ( $transaction_id ) {
+				$order->update_meta_data( 'payment_order_id', $transaction_id );
+			}
+			if ( $registration_id && '' === trim( (string) $order->get_meta( 'payment_registration_id', true ) ) ) {
+				$order->update_meta_data( 'payment_registration_id', $registration_id );
+			}
 	
 			// Get plugin setting: order status to apply
 			$settings      = get_option( 'woocommerce_peach-payments_settings', [] );
@@ -517,13 +553,35 @@ class PP_Gateway_Order_Utils {
 	 *
 	 * This is intentionally limited to subscription sessions whose checkout-time expected amount
 	 * was 0.00, so normal paid checkouts and renewal payment metadata remain unchanged.
+	/**
+	 * Return a safe destination for an existing subscription payment-method change.
+	 * Normal orders use the supplied fallback unchanged.
 	 *
-	 * @param WC_Order $order           Order/subscription object.
-	 * @param string   $registration_id Peach registration ID.
-	 * @param string   $source          Processing source for logging.
-	 * @param string   $payment_initial_id Initial transaction ID belonging to the new registration, when returned.
-	 * @param string   $payment_order_id   Peach payment/transaction ID belonging to the new registration, when returned.
-	 * @return bool True when this was a zero-value subscription registration checkout.
+	 * @param WC_Order $order    Order or subscription.
+	 * @param string   $fallback Fallback URL for normal orders.
+	 * @return string
+	 */
+	public static function get_payment_method_change_return_url( $order, $fallback = '' ) {
+		if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order ) ) {
+			if ( function_exists( 'wcs_get_view_subscription_url' ) ) {
+				return wcs_get_view_subscription_url( $order );
+			}
+
+			return wc_get_endpoint_url( 'view-subscription', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
+		}
+
+		return '' !== (string) $fallback ? $fallback : ( is_object( $order ) && method_exists( $order, 'get_checkout_payment_url' ) ? $order->get_checkout_payment_url() : wc_get_checkout_url() );
+	}
+
+	/**
+	 * Store a verified zero-value registration for an existing subscription.
+	 *
+	 * @param WC_Order $order Order/subscription object.
+	 * @param string $registration_id Peach registration ID.
+	 * @param string $source Processing source.
+	 * @param string $payment_initial_id Initial transaction ID.
+	 * @param string $payment_order_id Peach payment/transaction ID.
+	 * @return bool
 	 */
 	public static function maybe_store_zero_value_subscription_registration( WC_Order $order, $registration_id, $source = '', $payment_initial_id = '', $payment_order_id = '' ) {
 		$registration_id = trim( (string) $registration_id );
@@ -560,11 +618,19 @@ class PP_Gateway_Order_Utils {
 		}
 
 		if ( $previous_registration_id !== $registration_id ) {
-			$previous_masked = '' === $previous_registration_id ? 'none' : ( strlen( $previous_registration_id ) > 5 ? '...' . substr( $previous_registration_id, -5 ) : $previous_registration_id );
-			$new_masked      = strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id;
+			$previous_masked = '' === $previous_registration_id ? 'none' : PP_Gateway_Logger::mask_identifier_for_log( $previous_registration_id );
+			$new_masked      = PP_Gateway_Logger::mask_identifier_for_log( $registration_id );
 			$source_label    = '' !== trim( (string) $source ) ? sanitize_key( $source ) : 'verified_return';
 
 			PP_Gateway_Logger::info( 'Peach Payments zero-value subscription registration updated for order #' . $order->get_id() . ' via ' . $source_label . '. Previous registration ID: ' . $previous_masked . '. New registration ID: ' . $new_masked . '.' );
+		}
+
+		// Finalisation deliberately reloads the subscription under a lock. Persist the
+		// verified Peach IDs first so that instance (and Update All) sees the new card.
+		$order->save();
+
+		if ( class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+			PP_Gateway_Subscription_Handler::finalize_customer_payment_method_change( $order );
 		}
 
 		return true;
@@ -633,7 +699,7 @@ class PP_Gateway_Order_Utils {
 			update_user_meta( $user_id, 'my-cards', $cards );
 		}
 
-		PP_Gateway_Logger::info( 'Peach registration saved to My Cards for user #' . $user_id . ' from ' . sanitize_key( $source ) . '. Registration ID: ' . ( strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id ) . '.' );
+		PP_Gateway_Logger::info( 'Peach registration saved to My Cards for user #' . $user_id . ' from ' . sanitize_key( $source ) . '. Registration ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $registration_id ) . '.' );
 		return true;
 	}
 
@@ -651,11 +717,22 @@ class PP_Gateway_Order_Utils {
 			return;
 		}
 
-		$status_code     = sanitize_text_field( (string) $response['result_code'] );
+		$status_code              = sanitize_text_field( (string) $response['result_code'] );
+		$is_payment_method_change = function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order );
 
 		if ( self::is_non_final_result_code( $status_code ) ) {
 			PP_Gateway_Logger::info( 'Peach payment response for order #' . $order->get_id() . ' returned non-final result code ' . $status_code . '. Order left unchanged.' );
 			$order->save();
+			return;
+		}
+
+		// Cancelling or failing an existing subscription's card-change checkout must
+		// not alter either its lifecycle status or its existing recurring-payment meta.
+		if ( $is_payment_method_change && ! self::is_successful_result_code( $status_code ) ) {
+			if ( class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+				PP_Gateway_Subscription_Handler::abort_customer_payment_method_change( $order );
+			}
+			PP_Gateway_Logger::info( 'Peach subscription payment-method change for subscription #' . $order->get_id() . ' was not completed. Result code: ' . $status_code . '. Subscription and existing payment method left unchanged.' );
 			return;
 		}
 
@@ -678,7 +755,7 @@ class PP_Gateway_Order_Utils {
 		}
 
 		// Save to order meta (if not already stored)
-		if ( $transaction_id && ! metadata_exists( 'post', $order->get_id(), 'payment_order_id' ) ) {
+		if ( $transaction_id && '' === trim( (string) $order->get_meta( 'payment_order_id', true ) ) ) {
 			$order->update_meta_data( 'payment_order_id', $transaction_id );
 		}
 		if ( $registration_id ) {
@@ -689,7 +766,7 @@ class PP_Gateway_Order_Utils {
 				self::maybe_save_registration_to_user_cards( $order, $registration_id, $response, 'hosted_return' );
 			}
 
-			if ( ! $zero_value_subscription_registration && ! metadata_exists( 'post', $order->get_id(), 'payment_registration_id' ) ) {
+			if ( ! $zero_value_subscription_registration && '' === trim( (string) $order->get_meta( 'payment_registration_id', true ) ) ) {
 				$order->update_meta_data( 'payment_registration_id', $registration_id );
 			}
 		}
@@ -702,12 +779,16 @@ class PP_Gateway_Order_Utils {
 				return;
 			}
 
+			// Persist verified response metadata before reloading after lock acquisition.
+			$order->save();
 			$lock_acquired = self::acquire_initial_payment_lock( $order );
 			if ( ! $lock_acquired ) {
 				return;
 			}
 
 			try {
+				$fresh_order = self::get_fresh_order( $order->get_id() );
+				if ( $fresh_order ) { $order = $fresh_order; }
 				if ( self::initial_payment_already_processed( $order, $transaction_id ) ) {
 					$order->save();
 					return;

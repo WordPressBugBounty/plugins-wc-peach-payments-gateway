@@ -41,6 +41,17 @@ class PP_Gateway_IPN_Handler {
 			exit;
 		}
 
+		// A WC_Subscription object represents an existing-subscription payment-method
+		// change. Legacy IPN data must not alter its lifecycle or recurring-payment
+		// meta; verified hosted/webhook processing handles a successful new card.
+		$is_payment_method_change = function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order );
+		if ( $is_payment_method_change ) {
+			PP_Gateway_Logger::info( 'Peach IPN received for subscription payment-method change #' . $order_id . ' with status ' . sanitize_text_field( (string) $status ) . '. Subscription and existing payment method left unchanged.' );
+			status_header( 200 );
+			echo 'OK';
+			exit;
+		}
+
 		// Store meta fields
 		if ( $payment_id ) {
 			$order->update_meta_data( 'payment_order_id', $payment_id );

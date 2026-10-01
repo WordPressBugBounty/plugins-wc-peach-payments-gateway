@@ -55,7 +55,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		$this->method_title       = __( 'Peach Payments', 'woocommerce-gateway-peach-payments' );
 		$this->method_description = __( 'Secure hosted checkout and tokenised card payments via Peach Payments.', 'woocommerce-gateway-peach-payments' );
 		$this->has_fields         = false;
-		$this->supports           = [ 'products', 'refunds', 'subscriptions', 'subscription_cancellation', 'subscription_reactivation', 'subscription_suspension', 'subscription_amount_changes', 'subscription_date_changes', 'subscription_payment_method_change', 'subscription_payment_method_change_customer', 'multiple_subscriptions', 'manual_subscriptions', 'subscription_payment_method_change_admin' ];
+		$this->supports           = [ 'products', 'refunds', 'subscriptions', 'subscription_cancellation', 'subscription_reactivation', 'subscription_suspension', 'subscription_amount_changes', 'subscription_date_changes', 'subscription_payment_method_change', 'subscription_payment_method_change_customer', 'subscription_payment_method_delayed_change', 'multiple_subscriptions', 'manual_subscriptions', 'subscription_payment_method_change_admin' ];
 
 		$this->icon = WC_PEACH_GATEWAY_URL . 'assets/images/Peach_Payments_Primary_logo.png';
 
@@ -197,6 +197,80 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 	 */
 	public function process_payment( $order_id ) {
 		$order = wc_get_order( $order_id );
+
+		if ( $order && function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order ) ) {
+			// Existing-subscription payment-method changes go directly to Peach. Capture
+			// the original state here (real form submission only), before Subscriptions
+			// changes the manual-renewal flag after process_payment() succeeds.
+			// Preserve the baseline from the first live attempt. Subscriptions may have
+			// already changed requires_manual_renewal after a previous abandoned submit;
+			// a retry must not replace the customer's original state with that mutation.
+			$is_retry = class_exists( 'PP_Gateway_Subscription_Handler' )
+				&& PP_Gateway_Subscription_Handler::is_pending_customer_payment_method_change( $order );
+			$previous_gateway = $is_retry
+				? (string) $order->get_meta( '_peach_previous_payment_method', true )
+				: (string) $order->get_payment_method();
+			$previous_manual = $is_retry
+				? (string) $order->get_meta( '_peach_previous_requires_manual_renewal', true )
+				: ( $order->get_requires_manual_renewal() ? 'yes' : 'no' );
+			$previous_checkout_id = $is_retry
+				? (string) $order->get_meta( '_peach_checkout_id', true )
+				: '';
+
+			$response = PP_Peach_API::create_checkout( $order );
+
+			if ( is_wp_error( $response ) || empty( $response['redirectUrl'] ) ) {
+				return [ 'result' => 'failure' ];
+			}
+
+			// A retry has its own checkout-scoped cleanup. Remove the superseded
+			// attempt's scheduled row now that Peach successfully created the new
+			// session. The checkout ID is captured before create_checkout() replaces it.
+			if ( $is_retry && '' !== $previous_checkout_id && function_exists( 'as_unschedule_action' ) ) {
+				as_unschedule_action(
+					'peach_abort_abandoned_payment_method_change',
+					[ $order->get_id(), $previous_checkout_id ],
+					'peach-payments'
+				);
+			}
+
+			// Only make the attempt authoritative once Peach has created a session.
+			$order->update_meta_data( '_peach_pending_payment_method_change', time() );
+			$order->update_meta_data( '_peach_previous_payment_method', $previous_gateway );
+			$order->update_meta_data( '_peach_previous_requires_manual_renewal', $previous_manual );
+			$order->save();
+
+			// Restore the captured state if the customer abandons Peach and never returns.
+			// Scope the action to this exact checkout so an old cleanup cannot affect a retry.
+			$checkout_id = (string) $order->get_meta( '_peach_checkout_id', true );
+			if ( '' !== $checkout_id && function_exists( 'as_schedule_single_action' ) ) {
+				as_schedule_single_action(
+					time() + DAY_IN_SECONDS + MINUTE_IN_SECONDS,
+					'peach_abort_abandoned_payment_method_change',
+					[ $order->get_id(), $checkout_id ],
+					'peach-payments'
+				);
+			}
+
+			$redirect_url  = esc_url_raw( $response['redirectUrl'] );
+			$redirect_host = wp_parse_url( $redirect_url, PHP_URL_HOST );
+
+			// Subscriptions uses wp_safe_redirect() on the returned URL. Permit only the
+			// exact Peach host issued for this checkout, and only for this PHP request.
+			if ( is_string( $redirect_host ) && '' !== $redirect_host ) {
+				add_filter( 'allowed_redirect_hosts', static function ( $hosts ) use ( $redirect_host ) {
+					if ( ! in_array( $redirect_host, $hosts, true ) ) {
+						$hosts[] = $redirect_host;
+					}
+					return $hosts;
+				}, 10, 1 );
+			}
+
+			return [
+				'result'   => 'success',
+				'redirect' => $redirect_url,
+			];
+		}
 	
 		return [
 			'result'   => 'success',
@@ -387,8 +461,9 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			wp_die( esc_html__( 'Order not found.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
-		if ( $order->get_payment_method() !== $this->id ) {
-			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': order does not use the Peach Payments gateway.' );
+		$is_pending_change = class_exists( 'PP_Gateway_Subscription_Handler' ) && PP_Gateway_Subscription_Handler::is_pending_customer_payment_method_change( $order );
+		if ( $order->get_payment_method() !== $this->id && ! $is_pending_change ) {
+			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': order does not use the Peach Payments gateway and has no active Peach payment-method change.' );
 			wp_safe_redirect( wc_get_checkout_url() );
 			exit;
 		}
@@ -425,7 +500,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		if ( '' !== $returned_order_key && ! hash_equals( (string) $order->get_order_key(), (string) $returned_order_key ) ) {
 			PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': order key mismatch.' );
 			wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_safe_redirect( $order->get_checkout_payment_url() );
+			wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 			exit;
 		}
 
@@ -461,7 +536,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			if ( ! $return_token_matches ) {
 				PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': return token mismatch and no valid Peach payload signature was available.' );
 				wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-				wp_safe_redirect( $order->get_checkout_payment_url() );
+				wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 				exit;
 			}
 
@@ -470,7 +545,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			if ( '' === $resource_path && '' === $posted_checkout_id && '' === $posted_transaction_id ) {
 				PP_Gateway_Logger::warning( 'Peach hosted return for order #' . $order_id . ' did not include a resourcePath, checkoutId or transaction ID. Public POST result data was not trusted and the order was left unchanged.' );
 				wc_add_notice( __( 'We could not verify your Peach Payments transaction yet. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-				wp_safe_redirect( $order->get_checkout_payment_url() );
+				wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 				exit;
 			}
 
@@ -483,7 +558,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 				if ( is_wp_error( $resource_check ) ) {
 					PP_Gateway_Logger::warning( 'Peach hosted return rejected for order #' . $order_id . ': ' . $resource_check->get_error_message() );
 					wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-					wp_safe_redirect( $order->get_checkout_payment_url() );
+					wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 					exit;
 				}
 
@@ -495,7 +570,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 				if ( is_wp_error( $checkout_check ) ) {
 					PP_Gateway_Logger::error( 'Peach hosted return Checkout V2 verification rejected for order #' . $order_id . ': ' . $checkout_check->get_error_message() . ' Return payload: ' . print_r( $posted_return_payload, true ) );
 					wc_add_notice( __( 'Payment verification failed. Please try again.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-					wp_safe_redirect( $order->get_checkout_payment_url() );
+					wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 					exit;
 				}
 
@@ -507,7 +582,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 				}
 
 				if ( is_wp_error( $result ) && '' !== $posted_transaction_id ) {
-					PP_Gateway_Logger::warning( 'Peach hosted return Checkout V2 fallback verification failed for order #' . $order_id . ' and is falling back to server-to-server transaction ID verification. Checkout error: ' . $result->get_error_message() . '. Transaction ID: ' . $posted_transaction_id );
+					PP_Gateway_Logger::warning( 'Peach hosted return Checkout V2 fallback verification failed for order #' . $order_id . ' and is falling back to server-to-server transaction ID verification. Checkout error: ' . $result->get_error_message() . '. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $posted_transaction_id ) );
 					$result = PP_Peach_API::get_payment_result_from_transaction_id( $posted_transaction_id );
 				}
 			} else {
@@ -518,9 +593,9 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		if ( is_wp_error( $result ) ) {
 			$this->redirect_paid_or_processed_order_to_thank_you( $order, 'hosted return verification failed after the order had already been paid: ' . $result->get_error_message() );
 
-			PP_Gateway_Logger::error( 'Peach hosted return verification failed for order #' . $order_id . ': ' . $result->get_error_message() . ' Posted checkoutId: ' . $posted_checkout_id . '. Posted transaction ID: ' . $posted_transaction_id . '. Posted payload: ' . print_r( $posted_return_payload, true ) );
+			PP_Gateway_Logger::error( 'Peach hosted return verification failed for order #' . $order_id . ': ' . $result->get_error_message() . ' Posted checkoutId: ' . PP_Gateway_Logger::mask_identifier_for_log( $posted_checkout_id ) . '. Posted transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $posted_transaction_id ) . '. Posted payload: ' . print_r( $posted_return_payload, true ) );
 			wc_add_notice( __( 'Payment verification failed. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_safe_redirect( $order->get_checkout_payment_url() );
+			wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 			exit;
 		}
 
@@ -533,17 +608,26 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			$order->add_order_note( 'Peach payment return rejected: ' . $validation->get_error_message() );
 			$order->save();
 			wc_add_notice( __( 'Payment verification failed. Please try again or contact support if you were charged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-			wp_safe_redirect( $order->get_checkout_payment_url() );
+			wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order ) );
 			exit;
 		}
 
 		$code = isset( $result['result']['code'] ) ? sanitize_text_field( (string) $result['result']['code'] ) : '';
 
 		if ( PP_Gateway_Order_Utils::is_non_final_result_code( $code ) ) {
-			$order->update_status( 'on-hold', __( 'Payment pending via Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
+			$is_payment_method_change = function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order );
+			if ( ! $is_payment_method_change ) {
+				$order->update_status( 'on-hold', __( 'Payment pending via Peach Payments.', WC_PEACH_TEXT_DOMAIN ) );
+			} else {
+				if ( class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+					PP_Gateway_Subscription_Handler::clear_optimistic_change_payment_notice();
+				}
+				wc_add_notice( __( 'Your card change is still being processed. Your existing payment method remains in place until Peach confirms the change.', WC_PEACH_TEXT_DOMAIN ), 'notice' );
+				PP_Gateway_Logger::info( 'Peach subscription payment-method change for subscription #' . $order_id . ' returned a non-final result. Subscription status left unchanged.' );
+			}
 			$order->delete_meta_data( '_peach_return_token' );
 			$order->save();
-			wp_safe_redirect( $this->get_return_url( $order ) );
+			wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order, $this->get_return_url( $order ) ) );
 			exit;
 		}
 
@@ -561,12 +645,19 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 		}
 
 		if ( PP_Gateway_Order_Utils::is_successful_result_code( $code ) || $order->is_paid() || PP_Gateway_Order_Utils::initial_payment_already_processed( $order ) ) {
-			wp_safe_redirect( $this->get_return_url( $order ) );
+			wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order, $this->get_return_url( $order ) ) );
 			exit;
 		}
 
-		wc_add_notice( __( 'Payment was declined. Please try again or use a different payment method.', WC_PEACH_TEXT_DOMAIN ), 'error' );
-		wp_safe_redirect( wc_get_checkout_url() );
+		if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order ) ) {
+			if ( class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+				PP_Gateway_Subscription_Handler::abort_customer_payment_method_change( $order );
+			}
+			wc_add_notice( __( 'Card change was not completed. Your existing payment method is unchanged.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+		} else {
+			wc_add_notice( __( 'Payment was declined. Please try again or use a different payment method.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+		}
+		wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order, wc_get_checkout_url() ) );
 		exit;
 	}
 
@@ -602,7 +693,7 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			PP_Gateway_Logger::info( 'Peach hosted return for order #' . $order->get_id() . ' redirected to the thank-you page because ' . $log_reason . '.' );
 		}
 
-		wp_safe_redirect( $this->get_return_url( $order ) );
+		wp_safe_redirect( PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order, $this->get_return_url( $order ) ) );
 		exit;
 	}
 
@@ -815,19 +906,56 @@ class WC_Gateway_Peach_Hosted extends WC_Payment_Gateway {
 			return new WP_Error( 'peach_refund', __( 'Invalid order.', 'woocommerce-gateway-peach-payments' ) );
 		}
 	
-		$transaction_id = get_post_meta( $order_id, 'payment_order_id', true );
+		$is_renewal     = function_exists( 'wcs_order_contains_renewal' ) && wcs_order_contains_renewal( $order );
+		$transaction_id = trim( (string) $order->get_transaction_id() );
+
+		// Legacy fallback only. payment_order_id can exist on older Peach orders where
+		// WooCommerce's per-order transaction ID was not populated. Never prefer it
+		// over _transaction_id because subscription credential metadata may be copied.
+		if ( '' === $transaction_id && ! $is_renewal ) {
+			$transaction_id = trim( (string) $order->get_meta( 'payment_order_id', true ) );
+		}
 	
-		if ( ! $transaction_id ) {
+		if ( '' === $transaction_id ) {
 			return new WP_Error( 'peach_refund', __( 'Missing transaction ID.', 'woocommerce-gateway-peach-payments' ) );
 		}
 	
-		$response = PP_Peach_API::refund_payment( $transaction_id, $amount, $order->get_currency(), $reason );
-	
+		// Route by how this order was actually funded. Automatic saved-card renewals
+		// use the recurring API; failed/manual renewals paid by the customer use hosted checkout.
+		$payment_source = trim( (string) $order->get_meta( '_peach_renewal_payment_processed_source', true ) );
+		$processed_txn = trim( (string) $order->get_meta( '_peach_renewal_payment_processed_txn', true ) );
+		$was_recurring_api_charge = 'api_charge_saved_card' === $payment_source
+			&& '' !== $processed_txn
+			&& hash_equals( $processed_txn, $transaction_id );
+
+		// Backward compatibility for renewal orders created before the processing-source
+		// markers existed. Hosted renewals have a checkout ID; an older renewal with no
+		// checkout evidence is treated as a legacy recurring API charge.
+		if ( $is_renewal && '' === $payment_source && '' === trim( (string) $order->get_meta( '_peach_checkout_id', true ) ) ) {
+			$was_recurring_api_charge = true;
+			PP_Gateway_Logger::info( 'Refund for renewal order #' . $order->get_id() . ' is using legacy recurring-payment routing because no hosted checkout or processing-source marker exists.' );
+		}
+		$response = $was_recurring_api_charge
+			? PP_Peach_API::refund_recurring_payment( $transaction_id, $amount, $order->get_currency(), $reason )
+			: PP_Peach_API::refund_payment( $transaction_id, $amount, $order->get_currency(), $reason );
+
 		if ( is_wp_error( $response ) ) {
 			PP_Gateway_Logger::error( "Refund failed: " . $response->get_error_message() );
 			return $response;
 		}
 	
+		$result_code = isset( $response['result']['code'] ) ? trim( (string) $response['result']['code'] ) : ( isset( $response['result_code'] ) ? trim( (string) $response['result_code'] ) : '' );
+		if ( PP_Gateway_Order_Utils::is_non_final_result_code( $result_code ) ) {
+			$order->add_order_note( sprintf( 'Peach Payments refund request for %s is pending confirmation (result code %s). Check the Peach Payments Dashboard before retrying this refund.', wc_price( $amount ), $result_code ) );
+			PP_Gateway_Logger::warning( 'Refund for order #' . $order->get_id() . ' is pending at Peach Payments with result code ' . $result_code . '. An immediate retry could create a duplicate refund.' );
+			return new WP_Error( 'peach_refund_pending', __( 'Refund is pending at Peach Payments. Check the Peach Payments Dashboard before retrying.', 'woocommerce-gateway-peach-payments' ) );
+		}
+
+		if ( '' === $result_code || ! PP_Gateway_Order_Utils::is_successful_result_code( $result_code ) ) {
+			PP_Gateway_Logger::error( 'Refund was not confirmed successful by Peach Payments. Result code: ' . ( '' !== $result_code ? $result_code : 'missing' ) . '.' );
+			return new WP_Error( 'peach_refund_not_confirmed', __( 'Peach Payments did not confirm the refund as successful.', 'woocommerce-gateway-peach-payments' ) );
+		}
+
 		$order->add_order_note( sprintf( 'Refund of %s processed successfully via Peach Payments.', wc_price( $amount ) ) );
 	
 		return true;

@@ -333,10 +333,12 @@ class PP_Gateway_Change_Card_Endpoint {
 			} else {
 				$subscription->delete_meta_data( 'payment_initial_id' );
 			}
+			// Keep payment_order_id historical. This separate reference belongs to the selected credential
+			// and may safely change/clear when the customer changes cards.
 			if ( '' !== $selected_payment_order_id ) {
-				$subscription->update_meta_data( 'payment_order_id', $selected_payment_order_id );
+				$subscription->update_meta_data( '_peach_initial_id_reference_payment_id', $selected_payment_order_id );
 			} else {
-				$subscription->delete_meta_data( 'payment_order_id' );
+				$subscription->update_meta_data( '_peach_initial_id_reference_payment_id', 'none' );
 			}
 			$subscription->save();
 
@@ -354,17 +356,18 @@ class PP_Gateway_Change_Card_Endpoint {
 						$parent_order->delete_meta_data( 'payment_initial_id' );
 					}
 					if ( '' !== $selected_payment_order_id ) {
-						$parent_order->update_meta_data( 'payment_order_id', $selected_payment_order_id );
+						$parent_order->update_meta_data( '_peach_initial_id_reference_payment_id', $selected_payment_order_id );
 					} else {
-						$parent_order->delete_meta_data( 'payment_order_id' );
+						$parent_order->update_meta_data( '_peach_initial_id_reference_payment_id', 'none' );
 					}
+					// Keep the parent order's historical payment_order_id unchanged.
 					$parent_order->save();
 				}
 			}
 
 			// Add order note on subscription + parent order (audit trail).
-			$old_short = $current_reg_id !== '' ? '...' . substr( $current_reg_id, -5 ) : '';
-			$new_short = $selected_reg_id !== '' ? '...' . substr( $selected_reg_id, -5 ) : '';
+			$old_short = $current_reg_id !== '' ? PP_Gateway_Logger::mask_identifier_for_log( $current_reg_id ) : '';
+			$new_short = $selected_reg_id !== '' ? PP_Gateway_Logger::mask_identifier_for_log( $selected_reg_id ) : '';
 
 			$note = sprintf(
 				/* translators: 1: old registration id (short), 2: new registration id (short) */

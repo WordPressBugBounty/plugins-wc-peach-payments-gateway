@@ -4,8 +4,8 @@ Tags: woocommerce, payments, credit card, payment request
 Requires at least: 6.8
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.0.8
-Version: 4.0.8
+Stable tag: 4.0.9
+Version: 4.0.9
 License: GPLv3
 
 
@@ -44,6 +44,23 @@ Peach Payments is there to assist you in the application process with the respec
 
 
 == Changelog ==
+
+= 4.0.9 =
+ * Fix - Resolved the “Missing transaction ID” error on WooCommerce refunds by switching refund transaction lookup to WooCommerce order CRUD/transaction data instead of legacy post meta.
+ * Fix - Updated order and subscription data handling so the plugin works with both HPOS and legacy WooCommerce storage.
+ * Fix - Refunds now target the correct transaction for parent orders, renewals, and hosted payments, with better result validation.
+ * Tweak - Improved subscription renewal transaction tracking, retry handling, duplicate-charge protection, and pending or unknown payment handling.
+ * Fix - Prevented customer Hosted Checkout payments from racing against automatic saved-card renewal attempts.
+ * Tweak - Added stronger matching, locking, and reconciliation for delayed, pending, or unknown renewal webhook outcomes.
+ * Fix - Prevented stale initial transaction IDs or old card references from being paired with newly selected cards.
+ * Tweak - Strengthened concurrency protection so the same order or payment is not processed more than once.
+ * Fix - Added safe handling for Peach credential or entity failures without incorrectly triggering customer dunning.
+ * Tweak - Admins can retry the existing renewal order without creating a duplicate renewal order.
+ * Tweak - Added clearer warnings, duplicate-payment alerts, and admin-attributed notes for manual payment actions.
+ * Fix - Prevented checkout, session, and webhook metadata from carrying over to new renewal orders.
+ * Tweak - Automatic renewals now use a unique merchantTransactionId per attempt, with the WooCommerce order number sent as merchantInvoiceId for merchant reporting.
+ * Fix - Prevented an active subscription from being suspended when a customer starts a change-payment flow and then cancels on the payment page.
+ * Fix - Expired stored cards can now be deregistered when Peach returns a 400.
 
 = 4.0.8 =
   * Fix - Zero value add card and change payment sessions could miss a valid payment_initial_id when an earlier response field existed but was empty. Extraction now skips empty values and continues with valid Peach CIT fields, including the top level cardholderInitiatedTransactionId.

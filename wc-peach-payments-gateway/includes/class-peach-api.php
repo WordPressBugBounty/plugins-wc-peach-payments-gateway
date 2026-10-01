@@ -20,6 +20,8 @@ class PP_Peach_API {
 	 */
 	public function request( $endpoint, $method = 'POST', $data = [] ) {
 		$ch = curl_init();
+		curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, 15 );
+		curl_setopt( $ch, CURLOPT_TIMEOUT, 90 );
 		
 		$entity_id = PP_Gateway_Settings::get('channel_3ds');
 		
@@ -104,6 +106,20 @@ class PP_Peach_API {
 			return $response;
 		}
 
+		$result_code = isset( $response['result']['code'] ) ? trim( (string) $response['result']['code'] ) : '';
+
+		// A successful HTTP response can still contain a rejected Peach business result.
+		// Do not let the caller remove the local card unless Peach actually accepted
+		// the deregistration. Terminal stale-registration codes are handled explicitly
+		// by the saved-card deletion flow after subscription usage has been verified.
+		if ( '' === $result_code || ! PP_Gateway_Order_Utils::is_successful_result_code( $result_code ) ) {
+			$message = isset( $response['result']['description'] ) && '' !== trim( (string) $response['result']['description'] )
+				? trim( (string) $response['result']['description'] )
+				: __( 'Peach Payments could not deregister the saved card.', WC_PEACH_TEXT_DOMAIN );
+
+			return new WP_Error( 'peach_registration_delete_failed', $message, $response );
+		}
+
 		return true;
 	}
 	
@@ -120,17 +136,6 @@ class PP_Peach_API {
 	}
 
 	/**
-	 * Get the Peach API username and password string.
-	 *
-	 * @return string
-	 */
-	private function get_auth_string() {
-		$user = get_option( 'woocommerce_peach-payments_user_id', '' );
-		$pass = get_option( 'woocommerce_peach-payments_password', '' );
-		return $user . ':' . $pass;
-	}
-
-	/**
 	 * Log API-related errors with optional request/response context.
 	 *
 	 * @param string      $message  Error message to log.
@@ -139,29 +144,28 @@ class PP_Peach_API {
 	 * @param string|null $url      Endpoint URL (optional).
 	 */
 	public static function log_error( $message, $request = null, $response = null, $url = null ) {
-		if ( ! function_exists( 'wc_get_logger' ) ) {
+		if ( ! function_exists( 'wc_get_logger' ) || ! class_exists( 'PP_Gateway_Logger' ) ) {
 			return;
 		}
-	
-		$logger = wc_get_logger();
-		$log    = "Peach API Error: $message";
-	
-		if ( $url ) {
-			$log .= "\nURL: $url";
-		}
-	
-		if ( $request ) {
-			$masked = self::mask_sensitive_data( $request );
-			$log   .= "\nRequest: " . print_r( $masked, true );
-		}
-	
-		if ( $response ) {
-			$log .= "\nResponse: " . print_r( $response, true );
-		}
-	
-		$logger->error( $log, [ 'source' => 'peach-payments' ] );
-	}
 
+		$log = 'Peach API Error: ' . $message;
+
+		if ( $url ) {
+			$log .= "\nURL: " . $url;
+		}
+
+		if ( null !== $request ) {
+			$log .= "\nRequest: " . print_r( PP_Gateway_Logger::sanitize_data( $request ), true );
+		}
+
+		if ( null !== $response ) {
+			$log .= "\nResponse: " . print_r( PP_Gateway_Logger::sanitize_data( $response ), true );
+		}
+
+		// PP_Gateway_Logger is the single final write boundary. It sanitizes the
+		// fully composed message again immediately before WooCommerce writes it.
+		PP_Gateway_Logger::error( $log, 'peach-payments' );
+	}
 
 	/**
 	 * Mask sensitive data in logs.
@@ -172,58 +176,11 @@ class PP_Peach_API {
 	 * @return mixed
 	 */
 	public static function mask_sensitive_data( $data ) {
-		if ( is_string( $data ) ) {
-			$parts = explode( '&', $data );
-
-			foreach ( $parts as &$part ) {
-				if ( '' === $part ) {
-					continue;
-				}
-
-				$key_value = explode( '=', $part, 2 );
-				$key       = rawurldecode( $key_value[0] );
-				$value     = isset( $key_value[1] ) ? rawurldecode( $key_value[1] ) : '';
-
-				if ( 'card.number' === $key ) {
-					$last4 = substr( $value, -4 );
-					$value = '**** **** **** ' . $last4;
-				} elseif ( in_array( $key, [ 'card.cvv', 'authentication.userId', 'authentication.password' ], true ) ) {
-					$value = '***';
-				} else {
-					continue;
-				}
-
-				$part = $key_value[0] . '=' . $value;
-			}
-			unset( $part );
-
-			return implode( '&', $parts );
+		if ( class_exists( 'PP_Gateway_Logger' ) ) {
+			return PP_Gateway_Logger::sanitize_data( $data );
 		}
 
-		if ( ! is_array( $data ) ) {
-			return $data;
-		}
-
-		$masked = $data;
-
-		if ( isset( $masked['card.number'] ) ) {
-			$last4 = substr( $masked['card.number'], -4 );
-			$masked['card.number'] = '**** **** **** ' . $last4;
-		}
-
-		if ( isset( $masked['card.cvv'] ) ) {
-			$masked['card.cvv'] = '***';
-		}
-
-		if ( isset( $masked['authentication.userId'] ) ) {
-			$masked['authentication.userId'] = '***';
-		}
-
-		if ( isset( $masked['authentication.password'] ) ) {
-			$masked['authentication.password'] = '***';
-		}
-
-		return $masked;
+		return $data;
 	}
 
 
@@ -277,39 +234,6 @@ class PP_Peach_API {
 	}
 	
 	/**
-	 * Detect card brand based on the card number.
-	 *
-	 * @param string $number Card number.
-	 * @return string Card brand (e.g. VISA, MASTER, AMEX).
-	 */
-	protected function detect_brand( $number ) {
-		$number = preg_replace( '/\D/', '', $number ); // Remove non-digits
-	
-		if ( preg_match( '/^4[0-9]{12}(?:[0-9]{3})?$/', $number ) ) {
-			return 'VISA';
-		}
-	
-		if ( preg_match( '/^5[1-5][0-9]{14}$/', $number ) ) {
-			return 'MASTER';
-		}
-	
-		if ( preg_match( '/^3[47][0-9]{13}$/', $number ) ) {
-			return 'AMEX';
-		}
-	
-		if ( preg_match( '/^6(?:011|5[0-9]{2})[0-9]{12}$/', $number ) ) {
-			return 'DISCOVER';
-		}
-	
-		if ( preg_match( '/^(?:2131|1800|35\d{3})\d{11}$/', $number ) ) {
-			return 'JCB';
-		}
-	
-		// Default fallback
-		return 'VISA';
-	}
-	
-	/**
 	 * Perform a POST request to the Peach Payments API.
 	 *
 	 * @param string $endpoint Relative API endpoint (e.g., '/v1/registrations').
@@ -321,6 +245,8 @@ class PP_Peach_API {
 		$ssl = ( $transaction_mode === 'INTEGRATOR_TEST' ) ? false : true;
 		
 		$ch = curl_init();
+		curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, 15 );
+		curl_setopt( $ch, CURLOPT_TIMEOUT, 90 );
 		
 		if($type != 'refund'){
 			$full_url = self::get_endpoint_url() . ltrim( $endpoint, '/' );
@@ -346,7 +272,7 @@ class PP_Peach_API {
 			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 			curl_setopt($ch, CURLOPT_ENCODING, '');
 			curl_setopt($ch, CURLOPT_MAXREDIRS, 10);
-			curl_setopt($ch, CURLOPT_TIMEOUT, 0);
+			curl_setopt( $ch, CURLOPT_TIMEOUT, 90 );
 			curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
 			curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 			curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
@@ -370,17 +296,21 @@ class PP_Peach_API {
 				$full_url
 			);
 	
-			return new WP_Error( 'peach_api_curl_error', $error_message );
+			return new WP_Error( 'peach_api_curl_error', $error_message, [ '_curl_errno' => $curl_errno ] );
 		}
 	
 		curl_close( $ch );
 	
 		$response_data = json_decode( $response_body, true );
-		
-		
-		if(PP_Gateway_Order_Utils::is_successful_result_code($response_data['result']['code'])){
+		if ( ! is_array( $response_data ) ) {
+			self::log_error( 'Peach API returned an invalid or empty JSON response.', $payload, null, $full_url );
+			return new WP_Error( 'peach_api_invalid_response', __( 'Invalid response received from Peach Payments.', 'woocommerce-gateway-peach-payments' ) );
+		}
+
+		$result_code = isset( $response_data['result']['code'] ) ? trim( (string) $response_data['result']['code'] ) : ( isset( $response_data['result_code'] ) ? trim( (string) $response_data['result_code'] ) : '' );
+		if ( '' !== $result_code && PP_Gateway_Order_Utils::is_successful_result_code( $result_code ) ) {
 			return $response_data;
-		}else{
+		} else {
 			if ( $response_code < 200 || $response_code >= 300 ) {
 				self::log_error(
 					"Unexpected HTTP response code {$response_code} from {$endpoint}",
@@ -389,6 +319,7 @@ class PP_Peach_API {
 					$full_url
 				);
 		
+				$response_data['_http_status'] = $response_code;
 				return new WP_Error(
 					'peach_api_http_error',
 					'Unexpected HTTP response code: ' . $response_code,
@@ -417,13 +348,7 @@ class PP_Peach_API {
 	 * Mask sensitive card fields for logging.
 	 */
 	private function mask_sensitive_fields( $data ) {
-		if ( isset( $data['card']['number'] ) ) {
-			$data['card']['number'] = '****' . substr( $data['card']['number'], -4 );
-		}
-		if ( isset( $data['card']['cvv'] ) ) {
-			$data['card']['cvv'] = '***';
-		}
-		return $data;
+		return class_exists( 'PP_Gateway_Logger' ) ? PP_Gateway_Logger::sanitize_data( $data ) : $data;
 	}
 	
 	/**
@@ -1606,7 +1531,8 @@ class PP_Peach_API {
 			return new WP_Error( 'peach_invalid_order', __( 'Invalid WooCommerce order for Peach Payments verification.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
-		if ( 'peach-payments' !== $order->get_payment_method() ) {
+		$is_pending_change = class_exists( 'PP_Gateway_Subscription_Handler' ) && PP_Gateway_Subscription_Handler::is_pending_customer_payment_method_change( $order );
+		if ( 'peach-payments' !== $order->get_payment_method() && ! $is_pending_change ) {
 			return new WP_Error( 'peach_wrong_gateway', __( 'The WooCommerce order does not belong to the Peach Payments gateway.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
@@ -1631,8 +1557,17 @@ class PP_Peach_API {
 			]
 		);
 
-		if ( ! self::merchant_references_match( $expected_reference, (string) $received_reference ) ) {
-			return new WP_Error( 'peach_merchant_reference_mismatch', __( 'Peach Payments merchant reference did not match the WooCommerce order.', WC_PEACH_TEXT_DOMAIN ) );
+		$accepted_references = array_filter( array_unique( [
+			$expected_reference,
+			trim( (string) $order->get_meta( '_peach_renewal_attempt_reference', true ) ),
+			trim( (string) $order->get_meta( '_peach_renewal_payment_unknown_reference', true ) ),
+		] ) );
+		$reference_matches = false;
+		foreach ( $accepted_references as $accepted_reference ) {
+			if ( self::merchant_references_match( $accepted_reference, (string) $received_reference ) ) { $reference_matches = true; break; }
+		}
+		if ( ! $reference_matches ) {
+			return new WP_Error( 'peach_merchant_reference_mismatch', __( 'Peach Payments merchant reference did not match the WooCommerce order or a known Peach renewal attempt.', WC_PEACH_TEXT_DOMAIN ) );
 		}
 
 		$received_amount   = self::get_first_response_value( $response, [ 'amount', [ 'checkout', 'amount' ], [ 'payment', 'amount' ], [ 'payload', 'amount' ], [ 'payload', 'payment', 'amount' ] ] );
@@ -1788,6 +1723,32 @@ class PP_Peach_API {
 
 public static function create_checkout( WC_Order $order ) {
 		$order_id = $order->get_id();
+
+		// Customer-facing payments in this plugin are Peach Hosted Checkout only. Never
+		// start a hosted debit for a renewal while an automatic recurring debit has an
+		// unresolved outcome; two payment rails must not be active for the same renewal.
+		if ( function_exists( 'wcs_order_contains_renewal' ) && wcs_order_contains_renewal( $order ) && $order->get_meta( '_peach_renewal_payment_unknown', true ) ) {
+			wc_add_notice( __( 'This renewal payment is still being verified with Peach Payments. Please do not pay it again yet.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+			return new WP_Error( 'peach_renewal_payment_unresolved', __( 'A previous Peach renewal payment is still being verified.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+		if ( function_exists( 'wcs_order_contains_renewal' ) && wcs_order_contains_renewal( $order ) && class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+			// Serialize the start of Hosted Checkout against the automatic renewal worker.
+			// Once this marker is persisted, the recurring worker will not start a debit
+			// while the customer is completing Peach Hosted Checkout.
+			if ( ! PP_Gateway_Subscription_Handler::acquire_renewal_payment_lock( $order ) ) {
+				wc_add_notice( __( 'A Peach Payments renewal attempt is already being processed. Please wait before trying to pay this renewal.', WC_PEACH_TEXT_DOMAIN ), 'error' );
+				return new WP_Error( 'peach_renewal_attempt_busy', __( 'A Peach renewal payment attempt is already in progress.', WC_PEACH_TEXT_DOMAIN ) );
+			}
+			$fresh = PP_Gateway_Order_Utils::get_fresh_order( $order_id );
+			if ( $fresh && $fresh->get_meta( '_peach_renewal_payment_unknown', true ) ) {
+				PP_Gateway_Subscription_Handler::release_renewal_payment_lock( $order_id );
+				return new WP_Error( 'peach_renewal_payment_unresolved', __( 'A previous Peach renewal payment is still being verified.', WC_PEACH_TEXT_DOMAIN ) );
+			}
+			if ( $fresh ) { $order = $fresh; }
+			$order->update_meta_data( '_peach_hosted_checkout_started', time() );
+			$order->save();
+			PP_Gateway_Subscription_Handler::release_renewal_payment_lock( $order_id );
+		}
 		
 		$is_subscription = PP_Gateway_Order_Utils::is_subscription( $order );
 		
@@ -1831,6 +1792,24 @@ public static function create_checkout( WC_Order $order ) {
 		$billing_address = str_replace('&', ' ',$billing_address);
 		$billing_address = str_replace('.', '',$billing_address);
 	
+		// A WC_Subscription object reaches the gateway when an existing subscriber is
+		// changing their payment method. Cancelling that hosted session must only
+		// abandon the card change; it must never invoke WooCommerce's cancel-order
+		// action against the subscription itself.
+		$is_payment_method_change = function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order );
+		$cancel_url               = $order->get_cancel_order_url_raw();
+
+		if ( $is_payment_method_change ) {
+			$cancel_url = add_query_arg(
+				[
+					'peach_change_cancelled' => '1',
+					'subscription_id'       => $order_id,
+					'_wpnonce'              => wp_create_nonce( 'peach_cancel_change_' . $order_id ),
+				],
+				PP_Gateway_Order_Utils::get_payment_method_change_return_url( $order, $cancel_url )
+			);
+		}
+
 		// Prepare payload
 		$payload = [
 			'authentication.entityId' => $entity_id,
@@ -1850,7 +1829,7 @@ public static function create_checkout( WC_Order $order ) {
 				],
 				WC_PEACH_SITE_URL
 			),
-			'cancelUrl' => $order->get_cancel_order_url_raw(),
+			'cancelUrl' => $cancel_url,
 			'merchantInvoiceId' => $order_number,
 			'paymentType' => 'DB',
 			'customer' => [
@@ -1925,14 +1904,14 @@ public static function create_checkout( WC_Order $order ) {
 		$response = WC_Gateway_Peach_Hosted::create_checkout_session( $access_token, $payload );
 	
 		if ( empty( $response['redirectUrl'] ) ) {
-			$is_subscription_object = function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order );
-			$checkout_type          = $is_subscription_object ? 'subscription payment-method change' : ( $is_subscription ? 'subscription checkout' : 'standard checkout' );
+			$checkout_type          = $is_payment_method_change ? 'subscription payment-method change' : ( $is_subscription ? 'subscription checkout' : 'standard checkout' );
 			$registration_flag      = ! empty( $payload['createRegistration'] ) ? 'true' : 'false';
 			$payment_type            = isset( $payload['paymentType'] ) ? (string) $payload['paymentType'] : 'missing';
 
 			PP_Gateway_Logger::error( 'Peach checkout session creation failed for order #' . $order_id . ' (' . $checkout_type . '): Peach returned no redirect URL. amount=' . number_format( (float) $total, 2, '.', '' ) . ', paymentType=' . $payment_type . ', createRegistration=' . $registration_flag . '. Response: ' . print_r( $response, true ) );
 			self::log_error( 'Checkout session failed for order #' . $order_id . ' (' . $checkout_type . '): no redirect URL returned. amount=' . number_format( (float) $total, 2, '.', '' ) . ', paymentType=' . $payment_type . ', createRegistration=' . $registration_flag . '.', $payload, $response, '' );
 			$order->delete_meta_data( '_peach_return_token' );
+			$order->delete_meta_data( '_peach_hosted_checkout_started' );
 			$order->save();
 			$order->add_order_note( 'Peach API error: No redirect URL returned.' );
 			wc_add_notice( __( 'Peach Payments error. Please try again or use a different payment method.', 'woocommerce-gateway-peach-payments' ), 'error' );
@@ -1942,6 +1921,7 @@ public static function create_checkout( WC_Order $order ) {
 		$checkout_id = self::get_checkout_id_from_session_response( $response );
 		if ( '' !== $checkout_id ) {
 			$order->update_meta_data( '_peach_checkout_id', $checkout_id );
+			$order->update_meta_data( '_peach_hosted_checkout_started', time() );
 			$order->save();
 		} else {
 			PP_Gateway_Logger::warning( 'Peach checkout session response for order #' . $order_id . ' did not include a checkoutId/id for hosted-return verification. Response: ' . print_r( $response, true ) );
@@ -1978,9 +1958,25 @@ public static function create_checkout( WC_Order $order ) {
 		// Get WooCommerce order number (consider plugin settings)
 		$order_number = strval(PP_Gateway_Order_Utils::find_converted_number( $order_id, true ));
 		$order_number = strval(PP_Gateway_Order_Utils::order_number_prep( $order_number ));
+		// Do not race a customer who is already in Peach Hosted Checkout for this renewal.
+		// A hosted session is considered active for 30 minutes; callbacks may arrive later,
+		// but no automatic debit is allowed while the customer is reasonably still paying.
+		$hosted_started = absint( $order->get_meta( '_peach_hosted_checkout_started', true ) );
+		if ( $hosted_started && ( time() - $hosted_started ) < 30 * MINUTE_IN_SECONDS ) {
+			return new WP_Error( 'peach_hosted_checkout_in_progress', __( 'A Peach Hosted Checkout payment is already in progress for this renewal.', WC_PEACH_TEXT_DOMAIN ) );
+		}
+
+		// Peach Payments documents merchantTransactionId as 8-16 alphanumeric characters.
+		// Use a separate immutable 16-character reference for each automatic debit attempt;
+		// never overwrite the hosted-checkout expected reference.
+		$attempt_reference = 'R' . strtoupper( substr( hash( 'sha256', wp_generate_uuid4() . '|' . $order_id . '|' . microtime( true ) ), 0, 15 ) );
+		$order->update_meta_data( '_peach_renewal_attempt_reference', $attempt_reference );
+		$order->update_meta_data( '_peach_renewal_attempt_started', time() );
+		$order->save();
 	
 		$data = http_build_query( [
-			'merchantTransactionId'	=> $order_number, //Review 20250910
+			'merchantTransactionId'	=> $attempt_reference,
+			'merchantInvoiceId'      => $order_number,
 			'entityId'        => $entity_id,
 			'amount'          => number_format( $amount, 2, '.', '' ),
 			'currency'        => $currency,
@@ -2015,7 +2011,7 @@ public static function create_checkout( WC_Order $order ) {
 			}
 
 			if ( '' !== $parent_registration_id && $parent_registration_id !== $registration_id ) {
-				PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' skipped parent order COF metadata because the current registration ID differs from the parent registration ID. Current registration: ' . ( strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id ) . '. Parent registration: ' . ( strlen( $parent_registration_id ) > 5 ? '...' . substr( $parent_registration_id, -5 ) : $parent_registration_id ) . '. The renewal will continue without reusing the previous card initial transaction ID.' );
+				PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' skipped parent order COF metadata because the current registration ID differs from the parent registration ID. Current registration: ' . PP_Gateway_Logger::mask_identifier_for_log( $registration_id ) . '. Parent registration: ' . PP_Gateway_Logger::mask_identifier_for_log( $parent_registration_id ) . '. The renewal will continue without reusing the previous card initial transaction ID.' );
 			} else {
 				$payment_initial_id = trim( (string) $parent_order->get_meta( 'payment_initial_id', true ) );
 				if ( '' !== $payment_initial_id ) {
@@ -2023,7 +2019,14 @@ public static function create_checkout( WC_Order $order ) {
 				} else {
 					$entityId      = PP_Gateway_Settings::get( 'channel_3ds' );
 					$accessToken   = PP_Gateway_Settings::get( 'access_token' );
-					$transactionID = trim( (string) $parent_order->get_meta( 'payment_order_id', true ) );
+					$transactionID = trim( (string) $parent_order->get_meta( '_peach_initial_id_reference_payment_id', true ) );
+					// Backward compatibility: older orders predate the credential-specific reference.
+					// A literal 'none' is written by Change Card when the selected credential has no
+					// safe payment reference, preventing fallback to the historical old-card payment.
+					if ( '' === $transactionID && ( ! method_exists( $parent_order, 'meta_exists' ) || ! $parent_order->meta_exists( '_peach_initial_id_reference_payment_id' ) ) ) {
+						$transactionID = trim( (string) $parent_order->get_meta( 'payment_order_id', true ) );
+					}
+					if ( 'none' === $transactionID ) { $transactionID = ''; }
 
 					if ( '' !== $transactionID ) {
 						$payment_initial_id = $this->getInitialID( $accessToken, $entityId, $transactionID );
@@ -2037,9 +2040,9 @@ public static function create_checkout( WC_Order $order ) {
 
 		if ( ! empty( $payment_initial_id ) ) {
 			$data .= '&standingInstruction.initialTransactionId=' . urlencode( $payment_initial_id );
-			PP_Gateway_Logger::info( 'Peach renewal order #' . $order_id . ' using initial transaction ID from ' . $initial_id_source . ': ' . ( strlen( $payment_initial_id ) > 5 ? '...' . substr( $payment_initial_id, -5 ) : $payment_initial_id ) . '.' );
+			PP_Gateway_Logger::info( 'Peach renewal order #' . $order_id . ' using initial transaction ID from ' . $initial_id_source . ': ' . PP_Gateway_Logger::mask_identifier_for_log( $payment_initial_id ) . '.' );
 		} else {
-			PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' has no resolved payment_initial_id for registration ' . ( strlen( $registration_id ) > 5 ? '...' . substr( $registration_id, -5 ) : $registration_id ) . '. The recurring request will continue without standingInstruction.initialTransactionId to preserve legacy behaviour.' );
+			PP_Gateway_Logger::warning( 'Peach renewal order #' . $order_id . ' has no resolved payment_initial_id for registration ' . PP_Gateway_Logger::mask_identifier_for_log( $registration_id ) . '. The recurring request will continue without standingInstruction.initialTransactionId to preserve legacy behaviour.' );
 		}
 	
 		$url = '/v1/registrations/' . urlencode( $registration_id ) . '/payments';
@@ -2050,14 +2053,67 @@ public static function create_checkout( WC_Order $order ) {
 			return $response;
 		}
 	
-		if ( empty( $response['id'] ) || !PP_Gateway_Order_Utils::is_successful_result_code($response['result']['code']) ) {
+		$result_code = isset( $response['result']['code'] ) ? trim( (string) $response['result']['code'] ) : '';
+		if ( PP_Gateway_Order_Utils::is_non_final_result_code( $result_code ) ) {
+			// Preserve pending/indeterminate gateway responses so the caller can block
+			// automatic retries without incorrectly classifying the charge as declined.
+			return $response;
+		}
+
+		if ( empty( $response['id'] ) || ! PP_Gateway_Order_Utils::is_successful_result_code( $result_code ) ) {
 			$error = $response['result']['description'] ?? 'Unknown error';
-			return new WP_Error( 'peach_payment_failed', __( 'Payment failed: ', WC_PEACH_TEXT_DOMAIN ) . $error );
+			return new WP_Error( 'peach_payment_failed', __( 'Payment failed: ', WC_PEACH_TEXT_DOMAIN ) . $error, $response );
 		}
 	
 		return $response;
 	}
 	
+	public static function query_recurring_transaction_by_merchant_reference( $merchant_transaction_id, $order = null, $known_transaction_id = '', $unknown_since = 0 ) {
+		$merchant_transaction_id = trim( (string) $merchant_transaction_id );
+		if ( '' === $merchant_transaction_id ) { return new WP_Error( 'peach_query_missing_reference', __( 'Missing Peach merchant transaction reference.', WC_PEACH_TEXT_DOMAIN ) ); }
+		$entity_id = trim( (string) PP_Gateway_Settings::get( 'channel' ) );
+		$token     = trim( (string) PP_Gateway_Settings::get( 'access_token' ) );
+		if ( '' === $entity_id || '' === $token ) { return new WP_Error( 'peach_query_configuration', __( 'Peach recurring query credentials are incomplete.', WC_PEACH_TEXT_DOMAIN ) ); }
+		$url = self::get_endpoint_url() . 'v3/query?' . http_build_query( [ 'merchantTransactionId' => $merchant_transaction_id, 'entityId' => $entity_id ] );
+		$ch = curl_init();
+		curl_setopt_array( $ch, [ CURLOPT_URL => $url, CURLOPT_HTTPHEADER => [ 'Authorization: Bearer ' . $token, 'Accept: application/json' ], CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 15, CURLOPT_TIMEOUT => 60 ] );
+		$body = curl_exec( $ch ); $errno = curl_errno( $ch ); $error = curl_error( $ch ); $http = curl_getinfo( $ch, CURLINFO_HTTP_CODE ); curl_close( $ch );
+		if ( $errno ) { return new WP_Error( 'peach_query_curl_error', $error, [ '_curl_errno' => $errno ] ); }
+		$decoded = json_decode( $body, true );
+		if ( ! is_array( $decoded ) ) { return new WP_Error( 'peach_query_invalid_response', __( 'Invalid response received while reconciling Peach transaction.', WC_PEACH_TEXT_DOMAIN ) ); }
+		if ( $http < 200 || $http >= 300 ) { return new WP_Error( 'peach_query_http_error', __( 'Peach transaction reconciliation query failed.', WC_PEACH_TEXT_DOMAIN ), [ '_http_status' => $http, 'response' => $decoded ] ); }
+
+		// The query wrapper has its own result code (for example 000.000.100) and is
+		// not a payment. Only inspect actual transaction records returned by Peach.
+		$payments = [];
+		foreach ( [ 'payments', 'records', 'transactions' ] as $key ) {
+			if ( ! empty( $decoded[ $key ] ) && is_array( $decoded[ $key ] ) ) {
+				foreach ( $decoded[ $key ] as $item ) { if ( is_array( $item ) ) { $payments[] = $item; } }
+			}
+		}
+		$known_transaction_id = trim( (string) $known_transaction_id );
+		$since = max( 0, absint( $unknown_since ) - 300 );
+		$expected_amount = is_a( $order, 'WC_Order' ) ? wc_format_decimal( $order->get_total(), 2 ) : '';
+		$expected_currency = is_a( $order, 'WC_Order' ) ? strtoupper( (string) $order->get_currency() ) : '';
+		$matches = [];
+		foreach ( $payments as $item ) {
+			$ref = trim( (string) ( $item['merchantTransactionId'] ?? '' ) );
+			$id  = trim( (string) ( $item['id'] ?? '' ) );
+			if ( '' === $ref || '' === $id || ! hash_equals( $merchant_transaction_id, $ref ) ) { continue; }
+			if ( 'DB' !== strtoupper( trim( (string) ( $item['paymentType'] ?? '' ) ) ) ) { continue; }
+			if ( '' !== $known_transaction_id && ! hash_equals( $known_transaction_id, $id ) ) { continue; }
+			$timestamp = ! empty( $item['timestamp'] ) ? strtotime( (string) $item['timestamp'] ) : false;
+			if ( $since && $timestamp && $timestamp < $since ) { continue; }
+			if ( '' !== $expected_amount && isset( $item['amount'] ) && wc_format_decimal( $item['amount'], 2 ) !== $expected_amount ) { continue; }
+			if ( '' !== $expected_currency && ! empty( $item['currency'] ) && strtoupper( (string) $item['currency'] ) !== $expected_currency ) { continue; }
+			$matches[] = $item;
+		}
+		if ( empty( $matches ) ) { return new WP_Error( 'peach_query_not_found', __( 'Peach transaction was not found during reconciliation.', WC_PEACH_TEXT_DOMAIN ) ); }
+		usort( $matches, static function( $a, $b ) { return strtotime( $b['timestamp'] ?? '' ) <=> strtotime( $a['timestamp'] ?? '' ); } );
+		foreach ( $matches as $item ) { if ( PP_Gateway_Order_Utils::is_successful_result_code( $item['result']['code'] ?? '' ) ) { return $item; } }
+		return $matches[0];
+	}
+
 	public static function getInitialID($accesstoken, $entityId, $transactionID){
 		$full_url = self::get_endpoint_url();
 		
@@ -2151,6 +2207,28 @@ public static function create_checkout( WC_Order $order ) {
 	}
 
 	/**
+	 * Refund a recurring/server-to-server debit using the recurring entity.
+	 * Peach requires referencing transactions to use the same channel/entity as
+	 * the original payment, so renewal refunds cannot use the Checkout entity.
+	 */
+	public static function refund_recurring_payment( $transaction_id, $amount, $currency, $reason = '' ) {
+		$transaction_id = trim( (string) $transaction_id );
+		$entity_id      = trim( (string) PP_Gateway_Settings::get( 'channel' ) );
+		if ( '' === $transaction_id || empty( $amount ) || empty( $currency ) || '' === $entity_id ) {
+			return new WP_Error( 'peach_refund_missing_data', __( 'Missing required recurring refund data.', 'woocommerce-gateway-peach-payments' ) );
+		}
+		$payload = http_build_query(
+			[
+				'entityId'    => $entity_id,
+				'amount'      => number_format( (float) $amount, 2, '.', '' ),
+				'currency'    => (string) $currency,
+				'paymentType' => 'RF',
+			]
+		);
+		return self::post_request( '/v1/payments/' . rawurlencode( $transaction_id ), $payload );
+	}
+
+	/**
 	 * Reverse (RV) a preauthorisation transaction.
 	 *
 	 * Peach Payments docs: POST /v1/payments/{id} with paymentType=RV.
@@ -2190,7 +2268,7 @@ public static function create_checkout( WC_Order $order ) {
 
 		
 		if ( class_exists( 'PP_Gateway_Logger' ) ) {
-			PP_Gateway_Logger::info( 'Reversal attempt started. Transaction ID: ' . $transaction_id );
+			PP_Gateway_Logger::info( 'Reversal attempt started. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $transaction_id ) );
 		}
 $ch = curl_init();
 		curl_setopt( $ch, CURLOPT_URL, $url );
@@ -2218,7 +2296,7 @@ $ch = curl_init();
 
 			
 		if ( class_exists( 'PP_Gateway_Logger' ) ) {
-			PP_Gateway_Logger::error( 'Reversal request failed (cURL). Transaction ID: ' . $transaction_id . ' | Error: ' . $error_message );
+			PP_Gateway_Logger::error( 'Reversal request failed (cURL). Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $transaction_id ) . ' | Error: ' . $error_message );
 		}
 return new WP_Error( 'peach_api_curl_error', $error_message );
 		}
@@ -2237,7 +2315,7 @@ return new WP_Error( 'peach_api_curl_error', $error_message );
 
 			
 		if ( class_exists( 'PP_Gateway_Logger' ) ) {
-			PP_Gateway_Logger::error( 'Reversal HTTP failure. Transaction ID: ' . $transaction_id . ' | HTTP Code: ' . (int) $response_code );
+			PP_Gateway_Logger::error( 'Reversal HTTP failure. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $transaction_id ) . ' | HTTP Code: ' . (int) $response_code );
 		}
 return new WP_Error( 'peach_reversal_failed', __( 'Reversal request failed.', 'woocommerce-gateway-peach-payments' ) );
 		}
@@ -2249,12 +2327,12 @@ return new WP_Error( 'peach_reversal_failed', __( 'Reversal request failed.', 'w
 		if ( ! empty( $result_code ) && 0 === strpos( $result_code, '000.' ) ) {
 		
 		if ( class_exists( 'PP_Gateway_Logger' ) ) {
-			PP_Gateway_Logger::info( 'Reversal successful. Transaction ID: ' . $transaction_id . ' | Result: ' . $result_code . ( $result_desc ? ' - ' . $result_desc : '' ) );
+			PP_Gateway_Logger::info( 'Reversal successful. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $transaction_id ) . ' | Result: ' . $result_code . ( $result_desc ? ' - ' . $result_desc : '' ) );
 		}
 } else {
 		
 		if ( class_exists( 'PP_Gateway_Logger' ) ) {
-			PP_Gateway_Logger::warning( 'Reversal not successful. Transaction ID: ' . $transaction_id . ' | Result: ' . ( $result_code ?: 'N/A' ) . ( $result_desc ? ' - ' . $result_desc : '' ) );
+			PP_Gateway_Logger::warning( 'Reversal not successful. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $transaction_id ) . ' | Result: ' . ( $result_code ?: 'N/A' ) . ( $result_desc ? ' - ' . $result_desc : '' ) );
 		}
 }
 

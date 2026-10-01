@@ -123,18 +123,79 @@ class PP_Gateway_Token_Ajax_Handler {
 		// Delete from Peach API
 		$api          = new PP_Peach_API();
 		$api_response = $api->delete_token( $registration_id );
+		$stale_registration_result_code = '';
 	
 		if ( is_wp_error( $api_response ) ) {
-			self::log( 'error', "Saved card deletion failed. User ID: $user_id. Registration ID: $registration_id. Reason: Peach API token deletion failed. Error: " . $api_response->get_error_message() );
-			wp_send_json_error( [ 'message' => $api_response->get_error_message() ] );
+			$stale_registration_result_code = self::get_unavailable_registration_result_code( $api_response );
+
+			if ( '' === $stale_registration_result_code ) {
+				self::log( 'error', "Saved card deletion failed. User ID: $user_id. Registration ID: $registration_id. Reason: Peach API token deletion failed. Error: " . $api_response->get_error_message() );
+				wp_send_json_error( [ 'message' => $api_response->get_error_message() ] );
+			}
+
+			self::log(
+				'info',
+				"Saved card Peach registration is already unavailable. User ID: $user_id. Registration ID: $registration_id. Peach result code: $stale_registration_result_code. Local removal is allowed because no protected subscription uses this registration."
+			);
 		}
 	
-		// Remove from local user meta
+		// Remove from local user meta. This runs only after Peach deregistration succeeds,
+		// or Peach explicitly confirms that the unlinked registration is already unusable.
 		unset( $cards[ $found_index ] );
 		update_user_meta( $user_id, 'my-cards', array_values( $cards ) );
 	
-		self::log( 'info', "Saved card deleted successfully. User ID: $user_id. Registration ID: $registration_id." );
+		if ( '' !== $stale_registration_result_code ) {
+			self::log( 'info', "Saved card removed locally after Peach confirmed the registration is unavailable. User ID: $user_id. Registration ID: $registration_id. Peach result code: $stale_registration_result_code." );
+		} else {
+			self::log( 'info', "Saved card deleted successfully. User ID: $user_id. Registration ID: $registration_id." );
+		}
+
 		wp_send_json_success( [ 'message' => __( 'Card deleted successfully.', WC_PEACH_TEXT_DOMAIN ) ] );
+	}
+
+
+	/**
+	 * Return Peach's result code when a failed deregistration definitively means
+	 * the registration token is already absent or unusable at Peach Payments.
+	 *
+	 * Transient, configuration, authentication, and non-final registration states
+	 * are intentionally excluded. A failed deregistration by itself is never enough
+	 * to permit local card deletion.
+	 *
+	 * @param WP_Error $error Peach API error returned while deregistering the token.
+	 * @return string Terminal Peach result code, or an empty string when local deletion must remain blocked.
+	 */
+	protected static function get_unavailable_registration_result_code( $error ) {
+		if ( ! is_wp_error( $error ) ) {
+			return '';
+		}
+
+		$data = $error->get_error_data();
+		if ( ! is_array( $data ) ) {
+			return '';
+		}
+
+		$result_code = '';
+		if ( isset( $data['result']['code'] ) ) {
+			$result_code = trim( (string) $data['result']['code'] );
+		} elseif ( isset( $data['resultCode'] ) ) {
+			$result_code = trim( (string) $data['resultCode'] );
+		} elseif ( isset( $data['result_code'] ) ) {
+			$result_code = trim( (string) $data['result_code'] );
+		}
+
+		$unavailable_registration_codes = [
+			'100.150.101', // Invalid registration ID format.
+			'100.150.200', // Registration does not exist.
+			'100.150.202', // Registration is already deregistered.
+			'100.150.203', // Registration is not valid.
+			'100.150.204', // Registration reference points to no registration transaction.
+			'100.150.205', // Registration does not contain an account.
+			'100.150.206', // Registration retention period expired.
+			'100.350.303', // Cannot deregister an unregistered account/customer.
+		];
+
+		return in_array( $result_code, $unavailable_registration_codes, true ) ? $result_code : '';
 	}
 
 
@@ -380,8 +441,12 @@ class PP_Gateway_Token_Ajax_Handler {
 			return new WP_Error( 'peach_subscription_hpos_unavailable', 'HPOS subscription storage could not be verified.' );
 		}
 
-		$orders_table = $wpdb->prefix . 'wc_orders';
-		$meta_table   = $wpdb->prefix . 'wc_orders_meta';
+		$orders_table = class_exists( '\Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStore' )
+			? \Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStore::get_orders_table_name()
+			: $wpdb->prefix . 'wc_orders';
+		$meta_table = class_exists( '\Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStore' )
+			? \Automattic\WooCommerce\Internal\DataStores\Orders\OrdersTableDataStore::get_meta_table_name()
+			: $wpdb->prefix . 'wc_orders_meta';
 
 		$orders_table_exists = self::database_table_exists( $orders_table );
 		if ( is_wp_error( $orders_table_exists ) ) {
@@ -559,13 +624,11 @@ class PP_Gateway_Token_Ajax_Handler {
 	 * @param string $message Log message.
 	 */
 	protected static function log( $level, $message ) {
+		// The centralized logger is loaded by the plugin bootstrap before this
+		// handler. Do not fall back to an unsanitized logger if bootstrap is
+		// incomplete, because deletion errors may contain Peach identifiers.
 		if ( class_exists( 'PP_Gateway_Logger' ) ) {
 			PP_Gateway_Logger::log( $level, $message );
-			return;
-		}
-
-		if ( function_exists( 'wc_get_logger' ) ) {
-			wc_get_logger()->log( $level, $message, [ 'source' => 'peach_payments' ] );
 		}
 	}
 }

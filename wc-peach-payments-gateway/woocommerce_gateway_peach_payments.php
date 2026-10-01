@@ -5,7 +5,7 @@
  * Description: A payment gateway for <a href="https://www.peachpayments.com/" target="_blank" rel="noopener noreferrer">Peach Payments</a>.
  * Author: Peach Payments
  * Author URI: https://peachpayments.com
- * Version: 4.0.8
+ * Version: 4.0.9
  * Requires at least: 6.8
  * Tested up to: 7.0
  * Requires PHP: 7.4
@@ -13,6 +13,14 @@
  */
 
 defined( 'ABSPATH' ) || exit;
+
+// Declare support for both HPOS and the legacy posts-based order datastore.
+add_action( 'before_woocommerce_init', function() {
+	if ( class_exists( '\Automattic\WooCommerce\Utilities\FeaturesUtil' ) ) {
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'cart_checkout_blocks', __FILE__, true );
+	}
+} );
 
 if( ! function_exists('get_plugin_data') ){
 	require_once( ABSPATH . 'wp-admin/includes/plugin.php' );
@@ -44,7 +52,7 @@ define( 'WC_PEACH_GATEWAY_URL', plugin_dir_url( __FILE__ ) );
 define( 'WC_PEACH_TEXT_DOMAIN', 'woocommerce-gateway-peach-payments' );
 define( 'WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION', '2' );
 
-define( 'PEACH_FILE', 'wc-peach-payments-gateway/woocommerce-gateway-peach-payments.php' );
+define( 'PEACH_FILE', plugin_basename( __FILE__ ) );
 
 // Load logger
 require_once WC_PEACH_GATEWAY_PATH . 'includes/class-logger.php';
@@ -52,6 +60,25 @@ require_once WC_PEACH_GATEWAY_PATH . 'includes/class-logger.php';
 register_activation_hook( __FILE__, 'wc_peach_payments_activate' );
 register_deactivation_hook( __FILE__, 'wc_peach_payments_deactivate' );
 
+
+add_action( 'wc_peach_cleanup_runtime_locks', 'wc_peach_cleanup_runtime_locks' );
+function wc_peach_cleanup_runtime_locks() {
+	global $wpdb;
+	if ( ! isset( $wpdb->options ) ) { return; }
+	$cutoff = time() - DAY_IN_SECONDS;
+	$wpdb->query( $wpdb->prepare(
+		"DELETE FROM {$wpdb->options} WHERE (option_name LIKE %s OR option_name LIKE %s) AND CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) < %d",
+		$wpdb->esc_like( '_peach_initial_payment_lock_' ) . '%',
+		$wpdb->esc_like( '_peach_renewal_payment_lock_' ) . '%',
+		$cutoff
+	) );
+	$wpdb->query( $wpdb->prepare(
+		"DELETE FROM {$wpdb->options} WHERE option_name LIKE %s AND CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) < %d",
+		$wpdb->esc_like( 'pp_peach_renewal_charge_lock_' ) . '%',
+		$cutoff
+	) );
+	wp_cache_delete( 'notoptions', 'options' );
+}
 // Load after WooCommerce
 add_action( 'plugins_loaded', 'wc_peach_payments_init', 11 );
 add_action( 'plugins_loaded', 'wc_peach_payments_maybe_schedule_rewrite_flush', 12 );
@@ -63,12 +90,17 @@ function wc_peach_payments_activate() {
 	update_option( 'wc_peach_gateway_rewrite_schema_version', WC_PEACH_GATEWAY_REWRITE_SCHEMA_VERSION );
 	wc_peach_payments_run_ssl_check();
 	update_option( 'wc_peach_gateway_installed_version', WC_PEACH_GATEWAY_VERSION );
+	if ( ! wp_next_scheduled( 'wc_peach_cleanup_runtime_locks' ) ) {
+		wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'wc_peach_cleanup_runtime_locks' );
+	}
 }
 
 function wc_peach_payments_deactivate() {
 	delete_option( 'wc_peach_gateway_needs_rewrite_flush' );
 	delete_option( 'pp_cards_endpoint_flushed' );
 	delete_option( 'peach_change_card_endpoint_flushed' );
+	wp_clear_scheduled_hook( 'wc_peach_cleanup_runtime_locks' );
+	wc_peach_cleanup_runtime_locks();
 	flush_rewrite_rules();
 }
 
@@ -101,6 +133,10 @@ function wc_peach_payments_run_ssl_check() {
  * Run installation/update checks once when the plugin version changes.
  */
 function wc_peach_payments_maybe_run_install_update_checks() {
+	if ( ! wp_next_scheduled( 'wc_peach_cleanup_runtime_locks' ) ) {
+		wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'wc_peach_cleanup_runtime_locks' );
+	}
+
 	$installed_version = (string) get_option( 'wc_peach_gateway_installed_version', '' );
 
 	if ( WC_PEACH_GATEWAY_VERSION === $installed_version ) {

@@ -589,7 +589,7 @@ class PP_Gateway_Token_Add_Handler {
 		// Webhook/status reconciliation may complete before the shopper returns from Peach.
 		// Preserve the return-token transient so that the browser return can still be verified.
 		self::remove_pending_card_checkout( $user_id, $expected, false );
-		PP_Gateway_Logger::info( 'Peach add-card saved card for user #' . $user_id . ' from ' . sanitize_text_field( (string) $source ) . '. Registration ID: ' . $registration_id . '. Browser return token preserved for return verification.' );
+		PP_Gateway_Logger::info( 'Peach add-card saved card for user #' . $user_id . ' from ' . sanitize_text_field( (string) $source ) . '. Registration ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $registration_id ) . '. Browser return token preserved for return verification.' );
 
 		return true;
 	}
@@ -635,19 +635,19 @@ class PP_Gateway_Token_Add_Handler {
 
 			$status_result = PP_Peach_API::get_checkout_status_from_checkout_id( $checkout_id, 0, [], '' );
 			if ( is_wp_error( $status_result ) ) {
-				PP_Gateway_Logger::warning( 'Peach pending add-card status check failed for user #' . $user_id . '. Checkout ID: ' . $checkout_id . '. Error: ' . $status_result->get_error_message() );
+				PP_Gateway_Logger::warning( 'Peach pending add-card status check failed for user #' . $user_id . '. Checkout ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $checkout_id ) . '. Error: ' . $status_result->get_error_message() );
 				continue;
 			}
 
 			$response = self::normalise_checkout_v2_status_result_for_card_add( $status_result, [] );
 			if ( is_wp_error( $response ) ) {
-				PP_Gateway_Logger::warning( 'Peach pending add-card status response was not ready for user #' . $user_id . '. Checkout ID: ' . $checkout_id . '. Error: ' . $response->get_error_message() );
+				PP_Gateway_Logger::warning( 'Peach pending add-card status response was not ready for user #' . $user_id . '. Checkout ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $checkout_id ) . '. Error: ' . $response->get_error_message() );
 				continue;
 			}
 
 			$saved = self::save_card_from_verified_response( $user_id, $response, $expected, 'pending-status' );
 			if ( is_wp_error( $saved ) ) {
-				PP_Gateway_Logger::warning( 'Peach pending add-card could not be saved for user #' . $user_id . '. Checkout ID: ' . $checkout_id . '. Error: ' . $saved->get_error_message() . '. Response: ' . print_r( $response, true ) );
+				PP_Gateway_Logger::warning( 'Peach pending add-card could not be saved for user #' . $user_id . '. Checkout ID: ' . PP_Gateway_Logger::mask_identifier_for_log( $checkout_id ) . '. Error: ' . $saved->get_error_message() . '. Response: ' . print_r( $response, true ) );
 				continue;
 			}
 
@@ -897,14 +897,14 @@ class PP_Gateway_Token_Add_Handler {
 			if ( 'MUR' === $tx_currency && ! empty( $response['id'] ) ) {
 				$rv = PP_Peach_API::reverse_preauthorisation( sanitize_text_field( $response['id'] ) );
 				if ( is_wp_error( $rv ) ) {
-					PP_Gateway_Logger::error( 'Card add reversal failed. Transaction ID: ' . sanitize_text_field( $response['id'] ) . ' | Error: ' . $rv->get_error_message() );
+					PP_Gateway_Logger::error( 'Card add reversal failed. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( sanitize_text_field( $response['id'] ) ) . ' | Error: ' . $rv->get_error_message() );
 				} else {
 					$rv_result_code = $rv['result']['code'] ?? '';
 					$rv_result_desc = $rv['result']['description'] ?? '';
 					if ( ! empty( $rv_result_code ) && 0 === strpos( $rv_result_code, '000.' ) ) {
-						PP_Gateway_Logger::info( 'Card add reversal successful. Transaction ID: ' . sanitize_text_field( $response['id'] ) . ' | Result: ' . $rv_result_code . ( $rv_result_desc ? ' - ' . $rv_result_desc : '' ) );
+						PP_Gateway_Logger::info( 'Card add reversal successful. Transaction ID: ' . PP_Gateway_Logger::mask_identifier_for_log( sanitize_text_field( $response['id'] ) ) . ' | Result: ' . $rv_result_code . ( $rv_result_desc ? ' - ' . $rv_result_desc : '' ) );
 					} else {
-						PP_Gateway_Logger::warning( 'Card add reversal not successful. Transaction ID: ' . ( sanitize_text_field( $response['id'] ) ?: 'N/A' ) . ' | Result: ' . ( $rv_result_code ?: 'N/A' ) . ( $rv_result_desc ? ' - ' . $rv_result_desc : '' ) );
+						PP_Gateway_Logger::warning( 'Card add reversal not successful. Transaction ID: ' . ( ! empty( $response['id'] ) ? PP_Gateway_Logger::mask_identifier_for_log( sanitize_text_field( $response['id'] ) ) : 'N/A' ) . ' | Result: ' . ( $rv_result_code ?: 'N/A' ) . ( $rv_result_desc ? ' - ' . $rv_result_desc : '' ) );
 					}
 				}
 			}

@@ -974,6 +974,56 @@ class PP_Gateway_Webhook_Handler {
 		}
 
 		$is_successful_result = PP_Gateway_Order_Utils::is_successful_result_code( $result_code );
+
+		// Resolve an indeterminate automatic renewal before generic duplicate-webhook gates.
+		// The per-attempt merchant reference prevents a delayed webhook for an older retry
+		// (or a customer hosted-checkout payment) from resolving the wrong automatic attempt.
+		if ( function_exists( 'wcs_order_contains_renewal' ) && wcs_order_contains_renewal( $order ) && $order->get_meta( '_peach_renewal_payment_unknown', true ) && ! PP_Gateway_Order_Utils::is_non_final_result_code( $result_code ) && class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+			$unknown_txn   = trim( (string) $order->get_meta( '_peach_renewal_payment_unknown_txn', true ) );
+			$unknown_ref   = trim( (string) $order->get_meta( '_peach_renewal_payment_unknown_reference', true ) );
+			$attempt_started = absint( $order->get_meta( '_peach_renewal_attempt_started', true ) );
+			$webhook_txn   = trim( (string) $payment_order_id );
+			$webhook_ref   = trim( (string) $merchantTransactionId );
+			$webhook_time_raw = self::get_webhook_value( $data, [ [ 'payload', 'timestamp' ], 'timestamp' ] );
+			$webhook_time  = $webhook_time_raw ? strtotime( (string) $webhook_time_raw ) : time();
+			$webhook_amount = self::get_webhook_value( $data, [ [ 'payload', 'amount' ], 'amount' ] );
+			$webhook_currency = strtoupper( trim( (string) self::get_webhook_value( $data, [ [ 'payload', 'currency' ], 'currency' ] ) ) );
+			$webhook_payment_type = strtoupper( trim( (string) self::get_webhook_value( $data, [ [ 'payload', 'paymentType' ], 'paymentType' ] ) ) );
+			$amount_matches = null !== $webhook_amount && '' !== (string) $webhook_amount && wc_format_decimal( $webhook_amount, 2 ) === wc_format_decimal( $order->get_total(), 2 );
+			$currency_matches = '' !== $webhook_currency && $webhook_currency === strtoupper( (string) $order->get_currency() );
+			$matches_unknown = '' !== $unknown_ref && '' !== $webhook_ref && hash_equals( $unknown_ref, $webhook_ref )
+				&& ( '' === $unknown_txn || ( '' !== $webhook_txn && hash_equals( $unknown_txn, $webhook_txn ) ) )
+				&& ( ! $attempt_started || ! $webhook_time || $webhook_time >= ( $attempt_started - 300 ) )
+				&& $amount_matches && $currency_matches && 'DB' === $webhook_payment_type;
+			if ( $matches_unknown && ! PP_Gateway_Subscription_Handler::acquire_renewal_payment_lock( $order ) ) {
+				return [ 'log_type' => 'info', 'log_msg' => 'renewal order #' . $order_number . ' matching unknown-payment webhook deferred because reconciliation/renewal processing holds the lock', 'log_txt' => 'Unknown renewal webhook deferred' ];
+			}
+			if ( $matches_unknown ) {
+				try {
+					$fresh = PP_Gateway_Order_Utils::get_fresh_order( $order->get_id() );
+					if ( $fresh && $fresh->get_meta( '_peach_renewal_payment_unknown', true ) ) {
+						$order = $fresh;
+						if ( $is_successful_result && $order->is_paid() ) {
+							$paid_txn = trim( (string) $order->get_transaction_id() );
+							if ( '' !== $paid_txn && '' !== $webhook_txn && ! hash_equals( $paid_txn, $webhook_txn ) ) {
+								$order->update_meta_data( '_peach_possible_duplicate_transaction_id', $webhook_txn );
+								$order->save();
+								$order->add_order_note( 'Peach Payments WARNING: a second successful debit was received for this already-paid renewal. WooCommerce transaction ' . $paid_txn . '; additional Peach transaction ' . $webhook_txn . '. Verify both in Peach Payments and refund the duplicate if appropriate.', 0, false );
+								PP_Gateway_Subscription_Handler::raise_admin_alert( 'Possible duplicate payment on renewal order #' . $order->get_id() . '. Verify Peach transactions ' . $paid_txn . ' and ' . $webhook_txn . ' and refund the duplicate if appropriate.', 'duplicate_payment', $order->get_id() );
+								$admin_email = sanitize_email( get_option( 'admin_email' ) );
+								if ( $admin_email ) { wp_mail( $admin_email, 'Peach Payments: possible duplicate renewal payment', 'Renewal order #' . $order->get_id() . ' may have two successful Peach transactions: ' . $paid_txn . ' and ' . $webhook_txn . '. Verify both transactions and refund the duplicate if appropriate.' ); }
+								PP_Gateway_Subscription_Handler::clear_unknown_payment_state( $order );
+								return [ 'log_type' => 'error', 'log_msg' => 'renewal order #' . $order_number . ' received a second successful Peach debit; merchant review required', 'log_txt' => 'Possible duplicate renewal payment' ];
+							}
+						}
+						PP_Gateway_Subscription_Handler::clear_unknown_payment_state( $order );
+						if ( $is_successful_result ) { PP_Gateway_Subscription_Handler::mark_renewal_payment_processed( $order, $webhook_txn, 'api_charge_saved_card' ); }
+						PP_Gateway_Order_Utils::handle_subscription_payment_status( $order, [ 'id' => $webhook_txn, 'result' => [ 'code' => $result_code, 'description' => self::get_webhook_value( $data, [ [ 'payload', 'result', 'description' ], [ 'result', 'description' ], 'result_description' ] ) ] ] );
+						return [ 'log_type' => 'info', 'log_msg' => 'renewal order #' . $order_number . ' unknown Peach payment resolved by matching final webhook', 'log_txt' => 'Unknown renewal reconciled' ];
+					}
+				} finally { PP_Gateway_Subscription_Handler::release_renewal_payment_lock( $order->get_id() ); }
+			}
+		}
 		if (
 			! $is_successful_result
 			&& (
@@ -998,6 +1048,21 @@ class PP_Gateway_Webhook_Handler {
 				'log_txt'  => 'Webhook verification failed',
 			];
 		}
+
+		// A failed/cancelled zero-value payment-method-change webhook must never stage
+		// Peach IDs onto the existing subscription. Keep the previous gateway/card
+		// intact even if this branch gains a save or order note in future.
+		if ( function_exists( 'wcs_is_subscription' ) && wcs_is_subscription( $order ) && ! $is_successful_result ) {
+			if ( ! PP_Gateway_Order_Utils::is_non_final_result_code( $result_code ) && class_exists( 'PP_Gateway_Subscription_Handler' ) ) {
+				PP_Gateway_Subscription_Handler::abort_customer_payment_method_change( $order );
+			}
+			return [
+				'log_type' => 'info',
+				'log_msg'  => 'subscription #'.$order_number.' payment-method change was not completed; existing payment method left unchanged',
+				'log_txt'  => 'Subscription payment-method change ignored',
+			];
+		}
+
 
 		// Save metadata early so later duplicate requests still have the IDs available.
 		if ( ! empty( $payment_order_id ) ) {
@@ -1034,12 +1099,16 @@ class PP_Gateway_Webhook_Handler {
 				return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already handled', 'log_txt' => 'Already handled'];
 			}
 
+			// Persist verified webhook metadata before reloading after lock acquisition.
+			$order->save();
 			$lock_acquired = PP_Gateway_Order_Utils::acquire_initial_payment_lock( $order );
 			if ( ! $lock_acquired ) {
 				return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already being processed', 'log_txt' => 'Already handled'];
 			}
 
 			try {
+				$fresh_order = PP_Gateway_Order_Utils::get_fresh_order( $order->get_id() );
+				if ( $fresh_order ) { $order = $fresh_order; }
 				if ( $order->get_meta( 'peach_webhook_handled' ) || PP_Gateway_Order_Utils::initial_payment_already_processed( $order, $payment_order_id ) ) {
 					$order->save();
 					return ['log_type' => 'info', 'log_msg' => 'order #'.$order_number.' already handled after lock', 'log_txt' => 'Already handled'];
